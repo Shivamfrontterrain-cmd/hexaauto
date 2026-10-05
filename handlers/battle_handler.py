@@ -13,7 +13,12 @@ logger = logging.getLogger("autohexa.battle_handler")
 
 # Standard utility buttons in HeXamonbot
 UTILITY_BUTTON_NAMES = {
-    "run", "pokemons", "pokemon", "switch", "bag", "items"
+    "run", "pokemons", "pokemon", "switch", "bag", "items", "cancel", "back", "info"
+}
+
+# Sub-menu and turn progression action buttons
+ACTION_BUTTON_NAMES = {
+    "continue", "next", "proceed", "fight", "attack", "moves", "ok", "go", ">>"
 }
 
 BALL_BUTTON_NAMES = {
@@ -37,26 +42,91 @@ class BattleHandler:
             "caught_regular": 0
         }
 
-    def is_battle_message(self, message: Message) -> bool:
-        """Determines if a message belongs to an active battle."""
-        text = (message.raw_text or "").lower()
-        if "battle begins" in text or "current turn:" in text:
-            return True
-        if "lower " in text and "'s hp" in text:
-            return True
-        if "hp " in text and "/" in text and ("scratch" in text or "power:" in text or message.buttons):
-            return True
-        return False
-
     def is_battle_end(self, message: Message) -> bool:
         """Checks if a battle concluded (enemy fainted or captured)."""
+        if not message:
+            return False
         text = (message.raw_text or "").lower()
-        if "fainted" in text or "defeated" in text or ("gained" in text and ("pd" in text or "exp" in text)):
+
+        # Faint / defeat / victory indicators
+        if any(w in text for w in (
+            "fainted", "faint", "defeated", "defeat", "knocked out", "k.o.", " ko!", "ko.",
+            "won the battle", "battle won", "you won", "victory"
+        )):
             return True
-        if "congratulations" in text or "gotcha" in text or "was caught" in text:
+
+        # Pokédollars or EXP gained
+        if any(w in text for w in ("gained", "earned", "received")) and any(r in text for r in ("pd", "exp", "pokedollars", "pokédollars", "experience")):
             return True
-        if "ran away" in text or "escaped" in text or "blacked out" in text or "whited out" in text:
+
+        # Catch outcomes
+        if any(w in text for w in ("congratulations", "gotcha", "was caught", "caught", "captured")):
             return True
+
+        # Escapes or player blackout
+        if any(w in text for w in ("ran away", "escaped", "fled", "flew away", "blacked out", "whited out", "lost the battle")):
+            return True
+
+        # Wild HP explicitly zero
+        if re.search(r"hp[:\s]*0\s*/", text, re.IGNORECASE):
+            return True
+
+        return False
+
+    def is_battle_message(self, message: Message, account_name: Optional[str] = None) -> bool:
+        """Determines if a message belongs to an active battle."""
+        if not message:
+            return False
+
+        # If it's already concluded, it's an end message, not an active battle turn
+        if self.is_battle_end(message):
+            return False
+
+        text = (message.raw_text or "").lower()
+        buttons = message.buttons or []
+
+        # 1. Button-based detection (most reliable indicator)
+        if buttons:
+            button_texts = [btn.text.strip().lower() for row in buttons for btn in row]
+
+            # Battle utility buttons (Run, Pokemons, Switch, Bag)
+            if any(any(u in b for u in UTILITY_BUTTON_NAMES) for b in button_texts):
+                return True
+
+            # Action / sub-menu buttons (Fight, Attack, Moves, Continue, Next)
+            if any(any(a in b for a in ACTION_BUTTON_NAMES) for b in button_texts):
+                return True
+
+            # Check if any button matches a known Pokémon move
+            for b_text in button_texts:
+                clean_name = self.pokedex.clean_name(b_text)
+                if self.pokedex.get_move(clean_name):
+                    return True
+
+            # Check if buttons contain both Pokéballs and other choices in a wild/battle context
+            has_ball = any("ball" in b for b in button_texts)
+            if has_ball and len(button_texts) > 1 and any(w in text for w in ("hp", "lv", "turn", "wild", "vs")):
+                return True
+
+        # 2. Account is actively in a tracked battle
+        if account_name and account_name in self.active_battles and buttons:
+            return True
+
+        # 3. Text-based battle indicators
+        battle_phrases = (
+            "battle begins", "battle started", "current turn:", "turn:", "your turn",
+            "lower ", "'s hp", "for a better chance of catching"
+        )
+        if any(phrase in text for phrase in battle_phrases):
+            return True
+
+        # HP pattern (e.g., "HP 27/27", "HP: 13/27", "13/27") with battle context
+        if re.search(r"hp[:\s]*\d+\s*/\s*\d+", text, re.IGNORECASE):
+            return True
+
+        if buttons and ("wild" in text or "vs" in text) and any(w in text for w in ("lv", "level", "hp", "attack", "damage", "scratch", "power:")):
+            return True
+
         return False
 
     def parse_battle_state(self, text: str) -> dict:
@@ -84,8 +154,8 @@ class BattleHandler:
             if wild_match.group(2):
                 state["wild_types"] = [t.strip().lower() for t in wild_match.group(2).split("/")]
 
-        # Extract wild HP: "Lv. 8 • HP 27/27"
-        hp_matches = re.findall(r"hp\s+(\d+)\s*/\s*(\d+)", text, re.IGNORECASE)
+        # Extract wild HP: "Lv. 8 • HP 27/27" or "HP: 13/27"
+        hp_matches = re.findall(r"hp[:\s]*(\d+)\s*/\s*(\d+)", text, re.IGNORECASE)
         if hp_matches:
             # First match is usually wild Pokémon
             state["wild_hp"] = int(hp_matches[0][0])
@@ -115,55 +185,90 @@ class BattleHandler:
 
         return state
 
-    def categorize_buttons(self, message: Message) -> Tuple[Dict[str, any], Dict[str, any], Dict[str, any]]:
+    def categorize_buttons(self, message: Message) -> Tuple[Dict[str, any], Dict[str, any], Dict[str, any], Dict[str, any]]:
         """
         Categorizes buttons into:
-        1. move_buttons: moves known by current Pokémon (e.g. Scratch, Ember)
-        2. ball_buttons: Pokéballs (e.g. Poke Ball, Repeat Ball, Ultra Ball)
-        3. utility_buttons: Run, Pokemons, Bag, etc.
+        1. moves: Attack moves (e.g. Scratch, Ember, Water Gun)
+        2. balls: Pokéballs (e.g. Poke Ball, Repeat Ball)
+        3. utilities: Run, Pokemons, Bag, Switch
+        4. actions: Continue, Next, Fight, Attack, Proceed
         """
         moves = {}
         balls = {}
         utilities = {}
+        actions = {}
 
         if not message.buttons:
-            return moves, balls, utilities
+            return moves, balls, utilities, actions
 
         for row in message.buttons:
             for btn in row:
                 label = btn.text.strip()
-                label_clean = label.lower().replace(" ", "").replace("-", "")
+                label_lower = label.lower()
 
                 # Check if it's a utility button
-                if any(u in label.lower() for u in UTILITY_BUTTON_NAMES):
+                if any(u in label_lower for u in UTILITY_BUTTON_NAMES):
                     utilities[label] = btn
                     continue
 
-                # Check if it's a ball button (e.g. Poke Ball, Regular Ball, Repeat Ball)
-                if "ball" in label.lower() or "regular" in label.lower():
+                # Check if it's an action/continue/fight button
+                if any(a in label_lower for a in ACTION_BUTTON_NAMES):
+                    actions[label] = btn
+                    continue
+
+                # Check if it's a ball button
+                if "ball" in label_lower or "regular" in label_lower:
                     balls[label] = btn
                     continue
 
                 # Otherwise, it's a move button!
                 moves[label] = btn
 
-        return moves, balls, utilities
+        return moves, balls, utilities, actions
+
+    def _schedule_battle_watchdog(self, client: TelegramClient, account_name: str, chat_id: any, msg_id: int):
+        """Schedules a safety watchdog to re-check the battle message if Telegram edit event was missed."""
+        async def watchdog():
+            await asyncio.sleep(2.8)
+            battle = self.active_battles.get(account_name)
+            if not battle or battle.get("msg_id") != msg_id:
+                return
+
+            now = asyncio.get_event_loop().time()
+            if now - battle.get("last_click", 0) < 2.5:
+                return
+
+            try:
+                latest_msg = await client.get_messages(chat_id, ids=msg_id)
+                if not latest_msg:
+                    return
+
+                if self.is_battle_end(latest_msg):
+                    logger.info("[%s] ⚡ Watchdog detected battle victory/end on msg_id %d.", account_name, msg_id)
+                    self.handle_battle_result(account_name, latest_msg)
+                elif self.is_battle_message(latest_msg, account_name) and latest_msg.buttons:
+                    logger.info("[%s] 🔄 Watchdog re-triggering attack on active turn (msg_id %d)...", account_name, msg_id)
+                    await self.handle_battle_turn(client, account_name, latest_msg)
+            except Exception as e:
+                logger.debug("[%s] Watchdog check error: %s", account_name, e)
+
+        asyncio.create_task(watchdog())
 
     async def handle_battle_turn(self, client: TelegramClient, account_name: str, message: Message) -> bool:
         """Executes a battle decision based on config.BATTLE_SYSTEM."""
         raw_text = message.raw_text or ""
         state = self.parse_battle_state(raw_text)
-        moves, balls, utils = self.categorize_buttons(message)
+        moves, balls, utils, actions = self.categorize_buttons(message)
 
-        if not moves and not balls:
-            logger.warning("[%s] No moves or ball buttons available in battle turn.", account_name)
+        if not moves and not balls and not actions:
+            logger.warning("[%s] No moves, ball buttons, or action buttons available in battle turn.", account_name)
             return False
 
         star_tag = " [☆ Caught]" if state["has_star"] else " [New]"
-        logger.info("[%s] ⚔️ Battle Turn vs Wild %s%s (HP: %d/%d) | Moves: %s | Balls: %s",
+        logger.info("[%s] ⚔️ Battle Turn vs Wild %s%s (HP: %d/%d) | Moves: %s | Actions: %s | Balls: %s",
                     account_name, state["wild_name"], star_tag,
                     state["wild_hp"], state["wild_max_hp"],
-                    list(moves.keys()), list(balls.keys()))
+                    list(moves.keys()), list(actions.keys()), list(balls.keys()))
 
         chosen_button = None
         action_desc = ""
@@ -179,6 +284,12 @@ class BattleHandler:
                 best_move_name, score = ranked[0]
                 chosen_button = moves[best_move_name]
                 action_desc = f"[KILL MODE] Attacking with {best_move_name} (Damage score: {score:.1f})"
+            elif actions:
+                # If there are continue/next or fight buttons
+                continue_btn = next((btn for label, btn in actions.items() if any(c in label.lower() for c in ("continue", "next", "proceed", ">>", "ok"))), None)
+                fight_btn = next((btn for label, btn in actions.items() if any(f in label.lower() for f in ("fight", "attack", "moves"))), None)
+                chosen_button = continue_btn or fight_btn or list(actions.values())[0]
+                action_desc = f"[KILL MODE] Advancing battle turn with '{chosen_button.text}'"
             elif balls:
                 # Fallback if no moves are left (e.g. Struggle or out of PP)
                 chosen_button = list(balls.values())[0]
@@ -190,7 +301,6 @@ class BattleHandler:
         else:
             # Rule 1: '☆' detected -> Pokémon was already caught once -> USE REPEAT BALL!
             if state["has_star"]:
-                # Look specifically for Repeat Ball
                 repeat_btn = None
                 for label, btn in balls.items():
                     if "repeat" in label.lower():
@@ -201,14 +311,15 @@ class BattleHandler:
                     chosen_button = repeat_btn
                     action_desc = f"[HYBRID] 🔁 Pokémon has '☆' -> Throwing Repeat Ball at {state['wild_name']}"
                 elif balls:
-                    # If Repeat Ball is not available, use regular available ball
                     chosen_button = list(balls.values())[0]
                     action_desc = f"[HYBRID] 🔁 Has '☆' but Repeat Ball missing -> Throwing {chosen_button.text}"
                 elif moves:
-                    # No balls, attack
                     ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                     chosen_button = moves[ranked[0][0]]
                     action_desc = f"[HYBRID] No balls left -> Attacking {state['wild_name']} with {ranked[0][0]}"
+                elif actions:
+                    chosen_button = list(actions.values())[0]
+                    action_desc = f"[HYBRID] Advancing turn with '{chosen_button.text}'"
 
             # Rule 2: Not caught yet (No '☆')
             else:
@@ -217,7 +328,6 @@ class BattleHandler:
                 if rarity in ("legendary", "mythical", "rare", "starter"):
                     # High priority catch: Ultra/Master Ball
                     target_ball_btn = None
-                    # Search preferred order: Master > Ultra > Great > Poke
                     for pref in ["master", "ultra", "great", "poke"]:
                         for label, btn in balls.items():
                             if pref in label.lower():
@@ -236,16 +346,17 @@ class BattleHandler:
                         )
                         chosen_button = moves[safe_move]
                         action_desc = f"[HYBRID] Weakening {rarity} {state['wild_name']} with safe move {safe_move}"
+                    elif actions:
+                        chosen_button = list(actions.values())[0]
+                        action_desc = f"[HYBRID] Advancing turn with '{chosen_button.text}'"
                 else:
                     # Common Pokémon
                     if config.HYBRID_KILL_COMMONS and moves:
-                        # Kill common for PD
                         ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                         best_move, score = ranked[0]
                         chosen_button = moves[best_move]
                         action_desc = f"[HYBRID] Defeating common {state['wild_name']} with {best_move} for PD"
                     elif balls:
-                        # Throw standard Regular Ball (or Poke Ball)
                         regular_btn = None
                         for pref in ["regular", "poke"]:
                             for label, btn in balls.items():
@@ -260,26 +371,50 @@ class BattleHandler:
                         ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                         chosen_button = moves[ranked[0][0]]
                         action_desc = f"[HYBRID] Out of balls -> Attacking {state['wild_name']} with {ranked[0][0]}"
+                    elif actions:
+                        chosen_button = list(actions.values())[0]
+                        action_desc = f"[HYBRID] Advancing turn with '{chosen_button.text}'"
 
         if chosen_button:
             if getattr(config, "FAST_BATTLE", True):
                 delay = random.uniform(getattr(config, "FAST_BATTLE_MIN_DELAY", 0.05), getattr(config, "FAST_BATTLE_MAX_DELAY", 0.20))
             else:
                 delay = random.uniform(1.2, 2.5)
+
             logger.info("[%s] ⚡ %s (in %.2fs)...", account_name, action_desc, delay)
             if delay > 0:
                 await asyncio.sleep(delay)
+
+            # Record active battle state to maintain continuity across multiple turns
+            self.active_battles[account_name] = {
+                "msg_id": message.id,
+                "chat_id": message.chat_id,
+                "wild_name": state["wild_name"],
+                "last_click": asyncio.get_event_loop().time()
+            }
+
             try:
-                await chosen_button.click()
-                return True
+                # 3.0s timeout ensures we don't hang if Telegram bot omits the callback query answer
+                await asyncio.wait_for(chosen_button.click(), timeout=3.0)
+                click_success = True
+            except asyncio.TimeoutError:
+                logger.debug("[%s] Callback query answer timed out (click request was dispatched).", account_name)
+                click_success = True
             except Exception as e:
                 logger.error("[%s] Failed to click button '%s': %s", account_name, chosen_button.text, e)
-                return False
+                click_success = False
+
+            # Arm watchdog to guarantee consecutive turns keep clicking until Pokémon dies
+            self._schedule_battle_watchdog(client, account_name, message.chat_id, message.id)
+            return click_success
 
         return False
 
     def handle_battle_result(self, account_name: str, message: Message):
         """Processes end of battle rewards and statistics."""
+        # Clear from active battles
+        self.active_battles.pop(account_name, None)
+
         text = message.raw_text or ""
         text_lower = text.lower()
 
@@ -292,12 +427,12 @@ class BattleHandler:
             logger.info("[%s] 💰 BATTLE VICTORY! Earned %d PD! (Total Won: %d, Total PD: %d)",
                         account_name, pd_amount, self.stats["battles_won"], self.stats["pd_earned"])
 
-        elif "fainted" in text_lower or "defeated" in text_lower:
+        elif "fainted" in text_lower or "defeated" in text_lower or "won" in text_lower or "victory" in text_lower:
             self.stats["battles_won"] += 1
-            logger.info("[%s] 💥 Wild Pokémon fainted! Battle won (Total: %d).",
+            logger.info("[%s] 💥 Wild Pokémon fainted/defeated! Battle won (Total: %d).",
                         account_name, self.stats["battles_won"])
 
-        elif "caught" in text_lower or "congratulations" in text_lower:
+        elif "caught" in text_lower or "congratulations" in text_lower or "gotcha" in text_lower:
             if "repeat" in text_lower or "☆" in text:
                 self.stats["caught_repeat"] += 1
                 logger.info("[%s] 🔁 Caught Pokémon with Repeat Ball! Total Repeat: %d",

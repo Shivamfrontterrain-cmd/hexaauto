@@ -389,6 +389,98 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guess_handler.stats["pd_earned"], 500)
         on_end_mock.assert_called_once_with("test_account")
 
+    async def test_battle_multi_turn_kill_loop(self):
+        """Tests that BattleHandler continuously clicks moves across multiple turns until Pokémon dies."""
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        on_end_mock = MagicMock()
+        battle_handler = BattleHandler(pokedex, on_battle_end=on_end_mock)
+        config.BATTLE_SYSTEM = "kill"
+
+        mock_client = AsyncMock()
+
+        # Turn 1: Metapod at full HP (27/27)
+        turn1_msg = MagicMock()
+        turn1_msg.id = 101
+        turn1_msg.chat_id = 999
+        turn1_msg.raw_text = (
+            "Battle begins\n\n"
+            "Wild Metapod [Bug]\n"
+            "Lv. 8 • HP 27/27\n\n"
+            "Current turn: Shivam\n"
+            "Charmander [Fire]\n"
+            "Lv. 5 • HP 19/19"
+        )
+        btn_scratch_t1 = MagicMock(text="Scratch (35/35)", click=AsyncMock())
+        btn_ember_t1 = MagicMock(text="🔥 Ember (25/25)", click=AsyncMock())
+        btn_run_t1 = MagicMock(text="Run", click=AsyncMock())
+        turn1_msg.buttons = [[btn_scratch_t1, btn_ember_t1], [btn_run_t1]]
+
+        self.assertTrue(battle_handler.is_battle_message(turn1_msg, "acc1"))
+        await battle_handler.handle_battle_turn(mock_client, "acc1", turn1_msg)
+
+        # In Kill Mode, Ember must be clicked on Turn 1!
+        btn_ember_t1.click.assert_called_once()
+        btn_scratch_t1.click.assert_not_called()
+        self.assertIn("acc1", battle_handler.active_battles)
+
+        # Turn 2: Metapod survives with 13/27 HP (battle text changes)
+        turn2_msg = MagicMock()
+        turn2_msg.id = 101
+        turn2_msg.chat_id = 999
+        turn2_msg.raw_text = (
+            "Charmander used Ember! It's super effective!\n"
+            "Wild Metapod lost 14 HP!\n\n"
+            "Wild Metapod [Bug]\n"
+            "Lv. 8 • HP: 13/27\n\n"
+            "Charmander [Fire]\n"
+            "Lv. 5 • HP 19/19"
+        )
+        btn_scratch_t2 = MagicMock(text="Scratch (35/35)", click=AsyncMock())
+        btn_ember_t2 = MagicMock(text="🔥 Ember (24/25)", click=AsyncMock())
+        btn_run_t2 = MagicMock(text="Run", click=AsyncMock())
+        turn2_msg.buttons = [[btn_scratch_t2, btn_ember_t2], [btn_run_t2]]
+
+        self.assertTrue(battle_handler.is_battle_message(turn2_msg, "acc1"))
+        self.assertFalse(battle_handler.is_battle_end(turn2_msg))
+        await battle_handler.handle_battle_turn(mock_client, "acc1", turn2_msg)
+
+        # In Turn 2, Ember must be clicked again!
+        btn_ember_t2.click.assert_called_once()
+        btn_scratch_t2.click.assert_not_called()
+
+        # Turn 3: Metapod faints! Battle ends!
+        turn3_msg = MagicMock()
+        turn3_msg.id = 101
+        turn3_msg.chat_id = 999
+        turn3_msg.raw_text = "Wild Metapod fainted! You gained 180 exp and 420 PD!"
+        turn3_msg.buttons = []
+
+        self.assertTrue(battle_handler.is_battle_end(turn3_msg))
+        battle_handler.handle_battle_result("acc1", turn3_msg)
+
+        # Active battle cleared & instant on_battle_end dispatched for next /hunt!
+        self.assertNotIn("acc1", battle_handler.active_battles)
+        on_end_mock.assert_called_once_with("acc1")
+        self.assertEqual(battle_handler.stats["pd_earned"], 420)
+        self.assertEqual(battle_handler.stats["battles_won"], 1)
+
+    def test_spawn_does_not_intercept_battle(self):
+        """Ensures SpawnHandler does not steal battle messages with utility/move buttons."""
+        from handlers.spawn_handler import SpawnHandler
+
+        spawn_handler = SpawnHandler()
+        battle_msg = MagicMock()
+        battle_msg.raw_text = "Wild Metapod [Bug] Lv. 8 • HP: 13/27"
+        btn_move = MagicMock(text="Scratch")
+        btn_run = MagicMock(text="Run")
+        battle_msg.buttons = [[btn_move], [btn_run]]
+
+        self.assertFalse(spawn_handler.is_spawn_message(battle_msg))
+
 if __name__ == "__main__":
     unittest.main()
 

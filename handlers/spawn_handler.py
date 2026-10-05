@@ -27,7 +27,12 @@ CATCH_RESULT_PHRASES = [
     "broke free",
     "fled",
     "escaped",
-    "missed"
+    "missed",
+    "ran away",
+    "flew away",
+    "vanished",
+    "disappeared",
+    "was caught"
 ]
 
 class SpawnHandler:
@@ -42,8 +47,29 @@ class SpawnHandler:
         }
 
     def is_spawn_message(self, message: Message) -> bool:
-        """Checks if the message represents a wild Pokémon encounter."""
+        """Checks if the message represents a wild Pokémon encounter outside of battle."""
+        if not message:
+            return False
+
         text = (message.raw_text or "").lower()
+
+        # If it's a catch result or battle message, do not treat as a fresh spawn
+        if self.is_catch_result(message):
+            return False
+        if any(b in text for b in ("battle begins", "battle started", "current turn:", "turn:")):
+            return False
+
+        # If buttons contain battle utility or action buttons, it belongs to BattleHandler!
+        buttons = message.buttons or []
+        if buttons:
+            button_texts = [btn.text.strip().lower() for row in buttons for btn in row]
+            battle_btn_keywords = (
+                "run", "pokemons", "pokemon", "switch", "bag", "items",
+                "fight", "attack", "moves", "continue", "next"
+            )
+            if any(any(k in b for k in battle_btn_keywords) for b in button_texts):
+                return False
+
         if any(phrase in text for phrase in SPAWN_TRIGGER_PHRASES):
             # Also check if it has buttons or mentions a pokemon/ball
             if message.buttons or "level" in text or "appeared" in text or "wild" in text:

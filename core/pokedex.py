@@ -1,6 +1,7 @@
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("autohexa.pokedex")
@@ -32,8 +33,16 @@ class PokedexService:
         self.types_chart: Dict[str, dict] = {}
         self._load()
 
+    def clean_name(self, name: str) -> str:
+        """Strips PP indicators, brackets, parentheses, and special symbols from move/pokemon name."""
+        clean = re.sub(r"[\(\[\{].*?[\)\]\}]", "", name).strip()
+        clean = re.sub(r"[^\w\s\-]", "", clean).strip()
+        return clean or name
+
     def _normalize(self, name: str) -> str:
-        return name.lower().strip().replace(" ", "-").replace("'", "").replace(".", "")
+        clean = self.clean_name(name)
+        return clean.lower().strip().replace(" ", "-").replace("'", "").replace(".", "")
+
 
     def _load(self):
         if not self.filepath.exists():

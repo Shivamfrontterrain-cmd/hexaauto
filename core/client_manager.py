@@ -111,7 +111,7 @@ class ClientManager:
                 return
 
             # 6. Active Battle Turn (moves, balls, choices)
-            if self.battle_handler and self.battle_handler.is_battle_message(message):
+            if self.battle_handler and self.battle_handler.is_battle_message(message, account_name):
                 await self.battle_handler.handle_battle_turn(client, account_name, message)
                 return
 
