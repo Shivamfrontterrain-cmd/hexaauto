@@ -481,8 +481,45 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(spawn_handler.is_spawn_message(battle_msg))
 
+    async def test_hunt_categories_kill_vs_catch(self):
+        """Verifies explicit behavior of Category 1 (Kill) vs Category 2 (Catch)."""
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+        mock_client = AsyncMock()
+
+        # Encounter with wild Pidgey
+        msg = MagicMock()
+        msg.id = 202
+        msg.chat_id = 777
+        msg.raw_text = "Wild Pidgey [Normal/Flying]\nLv. 4 • HP: 16/16"
+        btn_scratch = MagicMock(text="Scratch", click=AsyncMock())
+        btn_ball = MagicMock(text="Poke Ball", click=AsyncMock())
+        msg.buttons = [[btn_scratch], [btn_ball]]
+
+        # Category 1: KILL
+        config.HUNT_MODE = "kill"
+        config.BATTLE_SYSTEM = "kill"
+        await battle_handler.handle_battle_turn(mock_client, "acc", msg)
+        btn_scratch.click.assert_called_once()
+        btn_ball.click.assert_not_called()
+
+        btn_scratch.click.reset_mock()
+        btn_ball.click.reset_mock()
+
+        # Category 2: CATCH
+        config.HUNT_MODE = "catch"
+        config.BATTLE_SYSTEM = "catch"
+        await battle_handler.handle_battle_turn(mock_client, "acc", msg)
+        btn_ball.click.assert_called_once()
+        btn_scratch.click.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

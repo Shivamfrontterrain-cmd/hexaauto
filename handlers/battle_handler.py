@@ -206,22 +206,22 @@ class BattleHandler:
                 label = btn.text.strip()
                 label_lower = label.lower()
 
-                # Check if it's a utility button
+                # 1. Check if it's a utility button
                 if any(u in label_lower for u in UTILITY_BUTTON_NAMES):
                     utilities[label] = btn
                     continue
 
-                # Check if it's an action/continue/fight button
-                if any(a in label_lower for a in ACTION_BUTTON_NAMES):
-                    actions[label] = btn
-                    continue
-
-                # Check if it's a ball button
+                # 2. Check if it's a ball button (MUST check before actions so 'Poke Ball' isn't matched by 'ok')
                 if "ball" in label_lower or "regular" in label_lower:
                     balls[label] = btn
                     continue
 
-                # Otherwise, it's a move button!
+                # 3. Check if it's an action/continue/fight button (word-boundary check)
+                if any(re.search(rf"\b{re.escape(a)}\b", label_lower) for a in ACTION_BUTTON_NAMES) or ">>" in label_lower:
+                    actions[label] = btn
+                    continue
+
+                # 4. Otherwise, it's a move button!
                 moves[label] = btn
 
         return moves, balls, utilities, actions
@@ -255,7 +255,7 @@ class BattleHandler:
         asyncio.create_task(watchdog())
 
     async def handle_battle_turn(self, client: TelegramClient, account_name: str, message: Message) -> bool:
-        """Executes a battle decision based on config.BATTLE_SYSTEM."""
+        """Executes a battle decision based on Hunt Category ('kill' vs 'catch')."""
         raw_text = message.raw_text or ""
         state = self.parse_battle_state(raw_text)
         moves, balls, utils, actions = self.categorize_buttons(message)
@@ -273,30 +273,40 @@ class BattleHandler:
         chosen_button = None
         action_desc = ""
 
+        # Determine Hunt Category: 'kill' vs 'catch'
+        bs = getattr(config, "BATTLE_SYSTEM", "").lower()
+        if bs in ("hybrid", "catch"):
+            hunt_mode = "catch"
+        elif bs == "kill":
+            hunt_mode = "kill"
+        else:
+            hm = getattr(config, "HUNT_MODE", "kill").lower()
+            hunt_mode = "catch" if hm in ("hybrid", "catch") else "kill"
+
         # =========================================================================
-        # SYSTEM 1: KILL MODE (FARMING PD - POKÉDOLLARS)
+        # CATEGORY 1: KILL MODE (FARMING PD - POKÉDOLLARS & EXP)
         # =========================================================================
-        if config.BATTLE_SYSTEM == "kill":
+        if hunt_mode == "kill":
             if moves:
                 ranked = self.pokedex.rank_moves_for_damage(
                     list(moves.keys()), state["my_types"], state["wild_types"]
                 )
                 best_move_name, score = ranked[0]
                 chosen_button = moves[best_move_name]
-                action_desc = f"[KILL MODE] Attacking with {best_move_name} (Damage score: {score:.1f})"
+                action_desc = f"[HUNT: KILL] Attacking with {best_move_name} (Damage score: {score:.1f})"
             elif actions:
                 # If there are continue/next or fight buttons
                 continue_btn = next((btn for label, btn in actions.items() if any(c in label.lower() for c in ("continue", "next", "proceed", ">>", "ok"))), None)
                 fight_btn = next((btn for label, btn in actions.items() if any(f in label.lower() for f in ("fight", "attack", "moves"))), None)
                 chosen_button = continue_btn or fight_btn or list(actions.values())[0]
-                action_desc = f"[KILL MODE] Advancing battle turn with '{chosen_button.text}'"
+                action_desc = f"[HUNT: KILL] Advancing battle turn with '{chosen_button.text}'"
             elif balls:
                 # Fallback if no moves are left (e.g. Struggle or out of PP)
                 chosen_button = list(balls.values())[0]
-                action_desc = "[KILL MODE] No moves available, throwing ball fallback"
+                action_desc = "[HUNT: KILL] No moves available, throwing ball fallback"
 
         # =========================================================================
-        # SYSTEM 2: HYBRID BY RARITY MODE
+        # CATEGORY 2: CATCH MODE (CAPTURE POKÉMON WITH BALLS)
         # =========================================================================
         else:
             # Rule 1: '☆' detected -> Pokémon was already caught once -> USE REPEAT BALL!
@@ -309,17 +319,17 @@ class BattleHandler:
 
                 if repeat_btn:
                     chosen_button = repeat_btn
-                    action_desc = f"[HYBRID] 🔁 Pokémon has '☆' -> Throwing Repeat Ball at {state['wild_name']}"
+                    action_desc = f"[HUNT: CATCH] 🔁 Pokémon has '☆' -> Throwing Repeat Ball at {state['wild_name']}"
                 elif balls:
                     chosen_button = list(balls.values())[0]
-                    action_desc = f"[HYBRID] 🔁 Has '☆' but Repeat Ball missing -> Throwing {chosen_button.text}"
+                    action_desc = f"[HUNT: CATCH] 🔁 Has '☆' but Repeat Ball missing -> Throwing {chosen_button.text}"
                 elif moves:
                     ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                     chosen_button = moves[ranked[0][0]]
-                    action_desc = f"[HYBRID] No balls left -> Attacking {state['wild_name']} with {ranked[0][0]}"
+                    action_desc = f"[HUNT: CATCH] No balls left -> Attacking {state['wild_name']} with {ranked[0][0]}"
                 elif actions:
                     chosen_button = list(actions.values())[0]
-                    action_desc = f"[HYBRID] Advancing turn with '{chosen_button.text}'"
+                    action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
 
             # Rule 2: Not caught yet (No '☆')
             else:
@@ -338,24 +348,24 @@ class BattleHandler:
 
                     if target_ball_btn:
                         chosen_button = target_ball_btn
-                        action_desc = f"[HYBRID] 🌟 {rarity.upper()} encounter -> Throwing {target_ball_btn.text} at {state['wild_name']}"
+                        action_desc = f"[HUNT: CATCH] 🌟 {rarity.upper()} encounter -> Throwing {target_ball_btn.text} at {state['wild_name']}"
                     elif moves:
                         # Weaken carefully with safe move
                         safe_move, score = self.pokedex.find_safe_move_to_weaken(
                             list(moves.keys()), state["my_types"], state["wild_types"]
                         )
                         chosen_button = moves[safe_move]
-                        action_desc = f"[HYBRID] Weakening {rarity} {state['wild_name']} with safe move {safe_move}"
+                        action_desc = f"[HUNT: CATCH] Weakening {rarity} {state['wild_name']} with safe move {safe_move}"
                     elif actions:
                         chosen_button = list(actions.values())[0]
-                        action_desc = f"[HYBRID] Advancing turn with '{chosen_button.text}'"
+                        action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
                 else:
                     # Common Pokémon
                     if config.HYBRID_KILL_COMMONS and moves:
                         ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                         best_move, score = ranked[0]
                         chosen_button = moves[best_move]
-                        action_desc = f"[HYBRID] Defeating common {state['wild_name']} with {best_move} for PD"
+                        action_desc = f"[HUNT: CATCH] Defeating common {state['wild_name']} with {best_move} for PD"
                     elif balls:
                         regular_btn = None
                         for pref in ["regular", "poke"]:
@@ -366,14 +376,15 @@ class BattleHandler:
                             if regular_btn:
                                 break
                         chosen_button = regular_btn or list(balls.values())[0]
-                        action_desc = f"[HYBRID] Throwing {chosen_button.text} (Regular Ball) at common {state['wild_name']}"
+                        action_desc = f"[HUNT: CATCH] Throwing {chosen_button.text} (Regular Ball) at common {state['wild_name']}"
                     elif moves:
                         ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                         chosen_button = moves[ranked[0][0]]
-                        action_desc = f"[HYBRID] Out of balls -> Attacking {state['wild_name']} with {ranked[0][0]}"
+                        action_desc = f"[HUNT: CATCH] Out of balls -> Attacking {state['wild_name']} with {ranked[0][0]}"
                     elif actions:
                         chosen_button = list(actions.values())[0]
-                        action_desc = f"[HYBRID] Advancing turn with '{chosen_button.text}'"
+                        action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
+
 
         if chosen_button:
             if getattr(config, "FAST_BATTLE", True):

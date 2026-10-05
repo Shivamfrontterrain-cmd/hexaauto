@@ -53,10 +53,15 @@ GUESS_MAX_DELAY = float(os.getenv("GUESS_MAX_DELAY", "0.20"))
 AUTO_CATCH_ENABLED = os.getenv("AUTO_CATCH_ENABLED", "True").lower() in ("true", "1", "yes")
 PREFERRED_BALLS = [b.strip() for b in os.getenv("PREFERRED_BALLS", "Masterball,Ultraball,Greatball,Repeatball,Regularball,Pokeball").split(",")]
 
-# Battle System Strategy:
-# - "kill": Only killing system to defeat wild Pokémon and farm PD (Pokédollars)
-# - "hybrid": Hybrid by rarity (Repeat Ball for '☆', Ultra/Master for Legendaries/Rares)
-BATTLE_SYSTEM = os.getenv("BATTLE_SYSTEM", "hybrid").lower().strip()
+# Hunt Category / Strategy:
+# - "kill":  Attack & defeat wild Pokémon with highest damage moves to farm PD & EXP
+# - "catch": Capture wild Pokémon with Pokéballs (Repeat Ball for '☆', Ultra/Master for Rares, Regular/Poke for Commons)
+HUNT_MODE = os.getenv("HUNT_MODE", os.getenv("BATTLE_SYSTEM", "kill")).lower().strip()
+if HUNT_MODE in ("hybrid", "catch"):
+    HUNT_MODE = "catch"
+elif HUNT_MODE not in ("kill", "catch"):
+    HUNT_MODE = "kill"
+BATTLE_SYSTEM = HUNT_MODE
 HYBRID_KILL_COMMONS = os.getenv("HYBRID_KILL_COMMONS", "False").lower() in ("true", "1", "yes")
 
 # Path to pokedex.json

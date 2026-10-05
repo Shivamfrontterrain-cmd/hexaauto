@@ -28,8 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger("autohexa.main")
 
 async def main():
-    logger.info("Initializing AutoHexa Anti-Bot Userbot System...")
-    logger.info("Active Battle System: '%s' (PD Farming / Hybrid by Rarity)", config.BATTLE_SYSTEM.upper())
+    logger.info("Active Hunt Category: '%s' (%s)",
+                config.HUNT_MODE.upper(),
+                "Defeat wild Pokémon for PD & EXP" if config.HUNT_MODE == "kill" else "Catch Pokémon with Pokéballs")
     logger.info("Auto-Guess System: %s (Command: '%s', Interval: %.1fs)",
                 "ENABLED" if config.AUTO_GUESS_ENABLED else "DISABLED",
                 config.GUESS_COMMAND, config.GUESS_INTERVAL)
@@ -146,6 +147,28 @@ async def main():
             if not selected_sessions:
                 print("[!] Invalid selection. Defaulting to ALL accounts.")
                 selected_sessions = available_sessions
+
+    # Interactive Hunt Category Selection (when hunting is enabled)
+    if config.ACTION_MODE in ("hunt", "both"):
+        current_cat = config.HUNT_MODE
+        default_num = "1" if current_cat == "kill" else "2"
+        print("\n" + "=" * 60)
+        print(" AutoHexa - Select Hunt Category")
+        print("=" * 60)
+        print(f" [1] Kill  - Defeat wild Pokémon for maximum PD & EXP {'[ACTIVE]' if current_cat == 'kill' else ''}")
+        print(f" [2] Catch - Throw Pokéballs to catch Pokémon (Repeat/Ultra/Poke) {'[ACTIVE]' if current_cat == 'catch' else ''}")
+        print("=" * 60)
+        try:
+            h_choice = input(f"Select category [1: Kill / 2: Catch] [default: {default_num}]: ").strip().lower()
+            if h_choice in ("1", "kill"):
+                config.HUNT_MODE = "kill"
+                config.BATTLE_SYSTEM = "kill"
+            elif h_choice in ("2", "catch", "hybrid"):
+                config.HUNT_MODE = "catch"
+                config.BATTLE_SYSTEM = "catch"
+        except (EOFError, KeyboardInterrupt):
+            pass
+        logger.info("Active Hunt Category: '%s'", config.HUNT_MODE.upper())
 
     account_names = [s.stem for s in selected_sessions]
     logger.info("Starting %d account(s): %s targeting @%s...",
