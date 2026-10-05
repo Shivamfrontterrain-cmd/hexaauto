@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import signal
 import sys
 from pathlib import Path
@@ -89,9 +90,9 @@ async def main():
         auto_guesser=auto_guesser
     )
 
-    # Check for accounts
-    sessions = manager.discover_sessions()
-    if not sessions:
+    # Check for available accounts
+    available_sessions = sorted(manager.discover_sessions(), key=lambda p: p.stem)
+    if not available_sessions:
         logger.warning("No .session files found in '%s'!", config.SESSIONS_DIR)
         print("\n" + "=" * 60)
         print(" [!] No Telegram accounts configured yet.")
@@ -100,8 +101,56 @@ async def main():
         print("=" * 60 + "\n")
         return
 
-    logger.info("Starting %d account(s) targeting @%s...", len(sessions), config.TARGET_BOT)
-    await manager.start_all()
+    # Interactive Account Selection Prompt
+    selected_sessions = []
+    if len(available_sessions) == 1:
+        selected_sessions = available_sessions
+        logger.info("Using configured account: '%s'", selected_sessions[0].stem)
+    else:
+        print("\n" + "=" * 60)
+        print(" AutoHexa - Select Telegram Account(s) to Run")
+        print("=" * 60)
+        for idx, s in enumerate(available_sessions, start=1):
+            print(f" [{idx}] {s.stem}")
+        print(f" [A] Run ALL accounts ({len(available_sessions)} accounts)")
+        print("=" * 60)
+
+        try:
+            choice = input(f"Select account number(s) (e.g. 1, or 1,2) [default: A]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if not choice or choice in ("a", "all"):
+            selected_sessions = available_sessions
+        else:
+            chosen_indices = []
+            for part in re.split(r"[\s,]+", choice):
+                if part.isdigit():
+                    num = int(part)
+                    if 1 <= num <= len(available_sessions):
+                        chosen_indices.append(num - 1)
+                    else:
+                        print(f"[!] Warning: Account number {num} is out of range.")
+                else:
+                    matching = [i for i, s in enumerate(available_sessions) if s.stem.lower() == part.lower()]
+                    if matching:
+                        chosen_indices.extend(matching)
+
+            seen = set()
+            for idx in chosen_indices:
+                if idx not in seen:
+                    seen.add(idx)
+                    selected_sessions.append(available_sessions[idx])
+
+            if not selected_sessions:
+                print("[!] Invalid selection. Defaulting to ALL accounts.")
+                selected_sessions = available_sessions
+
+    account_names = [s.stem for s in selected_sessions]
+    logger.info("Starting %d account(s): %s targeting @%s...",
+                len(selected_sessions), ", ".join(f"'{name}'" for name in account_names), config.TARGET_BOT)
+    await manager.start_all(selected_sessions)
 
     # Graceful shutdown handler
     stop_event = asyncio.Event()

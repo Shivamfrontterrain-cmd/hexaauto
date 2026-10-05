@@ -132,9 +132,10 @@ class ClientManager:
                 await self.spawn_handler.handle_spawn(client, account_name, message)
                 return
 
-    async def start_all(self):
-        """Discovers and starts all multi-account clients concurrently."""
-        session_files = self.discover_sessions()
+    async def start_all(self, session_files: Optional[List[Path]] = None):
+        """Discovers and starts multi-account clients concurrently."""
+        if session_files is None:
+            session_files = self.discover_sessions()
         if not session_files:
             logger.warning("No session files found in '%s' directory.", self.sessions_dir)
             return
