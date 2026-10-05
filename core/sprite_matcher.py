@@ -45,16 +45,17 @@ class SpriteMatcher:
         W, H = rgb_img.size
         pixels = rgb_img.load()
 
-        # Find black pixels in the silhouette region (left half, away from top/bottom borders)
+        # Neutral black filter: true Pokémon silhouettes are neutral dark pixels (r, g, b < 30 and abs diff <= 5)
+        # Backgrounds/borders have colored tints (e.g., dark blue/slate where blue >> red)
         black_pts = []
         for y in range(int(H * 0.05), int(H * 0.95)):
             for x in range(int(W * 0.02), int(W * 0.60)):
                 r, g, b = pixels[x, y]
-                # Match true black silhouette pixels
-                if r < 25 and g < 25 and b < 25:
+                if r < 30 and g < 30 and b < 30 and abs(r - g) <= 5 and abs(r - b) <= 5:
                     black_pts.append((x, y))
 
-        if len(black_pts) < 150:
+        min_pts = max(25, int(W * H * 0.003))
+        if len(black_pts) < min_pts:
             # Not enough silhouette pixels detected
             return None
 
@@ -63,7 +64,7 @@ class SpriteMatcher:
         min_x, min_y, max_x, max_y = min(xs), min(ys), max(xs), max(ys)
         bw, bh = max_x - min_x + 1, max_y - min_y + 1
 
-        if bw < 10 or bh < 10:
+        if bw < 5 or bh < 5:
             return None
 
         aspect_ratio = bw / bh

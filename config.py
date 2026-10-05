@@ -37,6 +37,9 @@ AUTO_GUESS_ENABLED = os.getenv("AUTO_GUESS_ENABLED", "True").lower() in ("true",
 GUESS_COMMAND = os.getenv("GUESS_COMMAND", "/guess")
 GUESS_INTERVAL = float(os.getenv("GUESS_INTERVAL", "5.0"))
 GUESS_JITTER = float(os.getenv("GUESS_JITTER", "2.0"))
+GUESS_INSTA_FLASH = os.getenv("GUESS_INSTA_FLASH", "True").lower() in ("true", "1", "yes")
+GUESS_MIN_DELAY = float(os.getenv("GUESS_MIN_DELAY", "0.05"))
+GUESS_MAX_DELAY = float(os.getenv("GUESS_MAX_DELAY", "0.20"))
 
 # Auto-Catch settings
 AUTO_CATCH_ENABLED = os.getenv("AUTO_CATCH_ENABLED", "True").lower() in ("true", "1", "yes")

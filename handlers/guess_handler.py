@@ -3,9 +3,11 @@ import logging
 import random
 import re
 from typing import Dict, Optional, Callable
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.tl.custom.message import Message
+from telethon.tl.types import PhotoStrippedSize
 
+import config
 from core.gemini_solver import GeminiSolver
 from core.sprite_matcher import SpriteMatcher
 
@@ -76,35 +78,72 @@ class GuessHandler:
         Tier 1: Local High-Speed Sprite Matcher (<0.2s, 99% accuracy)
         Tier 2: Gemini 3.1 Flash Lite Vision Fallback
         """
-        logger.info("[%s] 🖼️ 'Who's that Pokémon?' challenge detected! Downloading image...", account_name)
+        logger.info("[%s] 🖼️ 'Who's that Pokémon?' challenge detected! Resolving silhouette...", account_name)
 
         try:
-            # Download image bytes directly into memory
-            image_bytes = await message.download_media(file=bytes)
-            if not image_bytes:
-                logger.error("[%s] Failed to download image bytes for /guess challenge.", account_name)
-                if self.on_guess_end:
-                    self.on_guess_end(account_name)
-                return False
-
-            logger.info("[%s] Image downloaded (%d bytes). Resolving silhouette...",
-                        account_name, len(image_bytes))
-
             pokemon_name: Optional[str] = None
             confidence: float = 0.0
             source: str = ""
+            image_bytes: Optional[bytes] = None
 
-            # --- Tier 1: Local High-Speed Sprite Matcher ---
-            if self.sprite_matcher:
-                local_name, local_conf = self.sprite_matcher.match_silhouette(image_bytes)
-                if local_name and local_conf >= 0.80:
-                    pokemon_name = local_name
-                    confidence = local_conf
-                    source = f"Tier 1 (Local Sprite Matcher, {local_conf*100:.1f}%)"
-                    logger.info("[%s] ⚡ Instant Match via %s: '%s'", account_name, source, pokemon_name)
+            # --- Stage 0: Instant Embedded Stripped Thumbnail (0ms, 0 network requests!) ---
+            photo = getattr(message, "photo", None)
+            if photo and hasattr(photo, "sizes") and self.sprite_matcher:
+                for s in photo.sizes:
+                    if isinstance(s, PhotoStrippedSize):
+                        try:
+                            stripped_jpg = utils.stripped_photo_to_jpg(s.bytes)
+                            if stripped_jpg:
+                                s_name, s_conf = self.sprite_matcher.match_silhouette(stripped_jpg)
+                                if s_name and s_conf >= 0.88:
+                                    pokemon_name = s_name
+                                    confidence = s_conf
+                                    source = f"Tier 1 (Instant In-Memory Mask 0ms, {s_conf*100:.1f}%)"
+                                    image_bytes = stripped_jpg
+                                    break
+                        except Exception:
+                            pass
 
-            # --- Tier 2: Gemini Vision AI Fallback ---
+            # --- Stage 1: Ultra-Fast Medium Thumbnail Download (~10KB, ~40-60ms with cryptg) ---
+            if not pokemon_name and self.sprite_matcher:
+                try:
+                    thumb_bytes = await message.download_media(file=bytes, thumb="m")
+                    if thumb_bytes:
+                        t_name, t_conf = self.sprite_matcher.match_silhouette(thumb_bytes)
+                        if t_name and t_conf >= 0.82:
+                            pokemon_name = t_name
+                            confidence = t_conf
+                            source = f"Tier 1 (Fast Thumbnail, {t_conf*100:.1f}%)"
+                            image_bytes = thumb_bytes
+                except Exception as e:
+                    logger.debug("[%s] Thumbnail download skipped: %s", account_name, e)
+
+            # --- Stage 2: Full Image Download Fallback ---
             if not pokemon_name:
+                image_bytes = await message.download_media(file=bytes)
+                if not image_bytes:
+                    logger.error("[%s] Failed to download image bytes for /guess challenge.", account_name)
+                    if self.on_guess_end:
+                        self.on_guess_end(account_name)
+                    return False
+
+                if self.sprite_matcher:
+                    local_name, local_conf = self.sprite_matcher.match_silhouette(image_bytes)
+                    if local_name and local_conf >= 0.80:
+                        pokemon_name = local_name
+                        confidence = local_conf
+                        source = f"Tier 1 (Full Sprite Matcher, {local_conf*100:.1f}%)"
+
+            # --- Stage 3: Gemini Vision AI Fallback ---
+            if not pokemon_name:
+                if not image_bytes:
+                    image_bytes = await message.download_media(file=bytes)
+                if not image_bytes:
+                    logger.error("[%s] Could not obtain image for Gemini Vision.", account_name)
+                    if self.on_guess_end:
+                        self.on_guess_end(account_name)
+                    return False
+
                 logger.info("[%s] Local match not conclusive. Querying Tier 2 (Gemini Vision AI)...", account_name)
                 pokemon_name, confidence, reason = await self.gemini.solve_pokemon_silhouette(image_bytes)
                 source = "Tier 2 (Gemini Vision)"
@@ -129,11 +168,16 @@ class GuessHandler:
 
             self.stats["total_guesses"] += 1
 
-            # Simulated fast human typing delay (0.6 - 1.2 seconds)
-            delay = random.uniform(0.6, 1.2)
-            logger.info("[%s] 💡 Identified as '%s' via %s! Answering in %.2fs...",
-                        account_name, pokemon_name, source, delay)
-            await asyncio.sleep(delay)
+            # Insta-Flash vs Natural Delay
+            if getattr(config, "GUESS_INSTA_FLASH", True):
+                delay = random.uniform(getattr(config, "GUESS_MIN_DELAY", 0.05), getattr(config, "GUESS_MAX_DELAY", 0.20))
+            else:
+                delay = random.uniform(0.6, 1.2)
+
+            logger.info("[%s] ⚡ %s -> '%s'! Sending answer in %.2fs...",
+                        account_name, source, pokemon_name, delay)
+            if delay > 0:
+                await asyncio.sleep(delay)
 
             # Send answer (try reply first, fallback to direct message)
             try:
