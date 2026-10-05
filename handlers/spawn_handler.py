@@ -41,6 +41,10 @@ class SpawnHandler:
     def __init__(self, on_catch_end=None, battle_handler=None):
         self.on_catch_end = on_catch_end
         self.battle_handler = battle_handler
+        if battle_handler and hasattr(battle_handler, "starred_encounters"):
+            self.starred_encounters = battle_handler.starred_encounters
+        else:
+            self.starred_encounters = {}
         self.stats = {
             "encountered": 0,
             "caught": 0,
@@ -58,6 +62,8 @@ class SpawnHandler:
         if self.is_catch_result(message):
             return False
         if any(b in text for b in ("battle begins", "battle started", "current turn:", "turn:")):
+            return False
+        if re.search(r"hp[:\s]*\d+\s*/\s*\d+", text, re.IGNORECASE):
             return False
 
         # If buttons contain battle utility or action buttons, it belongs to BattleHandler!
@@ -158,6 +164,7 @@ class SpawnHandler:
                     "run", "pokemons", "pokemon", "switch", "bag", "moves", "scratch", "tackle", "ember"
                 )) for b in button_texts)
                 has_battle_btn = any(any(k in b for k in ("battle", "battles", "fight")) for b in button_texts)
+                has_ball_buttons = any(any(k in b for k in ("ball", "repeat", "regular")) for b in button_texts)
 
                 # Has battle concluded or started?
                 if self.battle_handler:
@@ -165,7 +172,7 @@ class SpawnHandler:
                         logger.info("[%s] ⚔️ Battle ended immediately on msg_id %d!", account_name, msg_id)
                         self.battle_handler.handle_battle_result(account_name, latest_msg)
                         return True
-                    if self.battle_handler.is_battle_message(latest_msg, account_name) or has_battle_phrase or has_hp_indicator or has_battle_controls:
+                    if self.battle_handler.is_battle_message(latest_msg, account_name) or has_battle_phrase or has_hp_indicator or has_battle_controls or has_ball_buttons:
                         logger.info("[%s] ⚔️ Battle confirmed started on msg_id %d (attempt %d)!", account_name, msg_id, attempt)
                         await self.battle_handler.handle_battle_turn(client, account_name, latest_msg)
                         return True
@@ -173,6 +180,8 @@ class SpawnHandler:
                 # If battle button is no longer present on the message, it transitioned!
                 if not has_battle_btn and (latest_buttons or latest_text != (message.raw_text or "").lower()):
                     logger.info("[%s] ⚔️ Battle button disappeared; transition successful.", account_name)
+                    if self.battle_handler:
+                        await self.battle_handler.handle_battle_turn(client, account_name, latest_msg)
                     return True
 
                 # If battle button is still present, update current_btn reference for the next attempt
@@ -180,16 +189,17 @@ class SpawnHandler:
                 if new_btn:
                     current_btn = new_btn
 
-            # Check 6: Check if a NEW message was sent to the chat that is a battle message
-            try:
-                recent_msgs = await client.get_messages(chat_id, limit=3)
-                for r_msg in recent_msgs:
-                    if r_msg.id != msg_id and self.battle_handler and self.battle_handler.is_battle_message(r_msg, account_name):
-                        logger.info("[%s] ⚔️ New battle message detected in chat (msg_id %d)!", account_name, r_msg.id)
-                        await self.battle_handler.handle_battle_turn(client, account_name, r_msg)
-                        return True
-            except Exception as e:
-                logger.debug("[%s] Error checking recent messages: %s", account_name, e)
+            # Check 6: If original message couldn't be re-fetched (e.g. deleted), check if a NEW message was sent
+            if latest_msg is None:
+                try:
+                    recent_msgs = await client.get_messages(chat_id, limit=3)
+                    for r_msg in recent_msgs:
+                        if self.battle_handler and self.battle_handler.is_battle_message(r_msg, account_name):
+                            logger.info("[%s] ⚔️ New battle message detected in chat (msg_id %d)!", account_name, r_msg.id)
+                            await self.battle_handler.handle_battle_turn(client, account_name, r_msg)
+                            return True
+                except Exception as e:
+                    logger.debug("[%s] Error checking recent messages: %s", account_name, e)
 
         logger.warning("[%s] ⚠️ Battle button clicked %d times but battle did not confirm started.", account_name, max_attempts)
         if self.on_catch_end:
@@ -236,6 +246,13 @@ class SpawnHandler:
         if not has_star:
             has_star = any(any(s in label for s in ("☆", "★", "⭐", "🌟", "✨")) or "[☆" in label for label in button_map.keys())
 
+        # Track star encounter in shared dict so BattleHandler knows this encounter has '☆'
+        if has_star:
+            self.starred_encounters[account_name] = True
+            logger.info("[%s] ⭐ Wild encounter %s has '☆' star! Tracked for Repeat Ball catch.", account_name, poke_name)
+        else:
+            self.starred_encounters[account_name] = False
+
         star_desc = " [☆ Star/Caught]" if has_star else " [New]"
         logger.info("[%s] 🌟 Wild encounter: %s%s | Hunt Category: %s",
                     account_name, poke_name, star_desc, hunt_mode.upper())
@@ -248,8 +265,20 @@ class SpawnHandler:
                 battle_btn = btn
                 break
 
+        # Check if any ball buttons are available directly on this message
+        has_ball_buttons = any("ball" in l or "repeat" in l or "regular" in l for l in button_map.keys())
+
         # =========================================================================
-        # CATEGORY 1: KILL MODE (FARMING PD/EXP -> MUST BATTLE!)
+        # CASE 1: BATTLE BUTTON PRESENT AND NO BALLS ON SCREEN (e.g. Clefairy spawn)
+        # MUST CLICK BATTLE TO START ENCOUNTER/BATTLE (IN BOTH KILL AND CATCH MODES!)
+        # =========================================================================
+        if battle_btn and not has_ball_buttons:
+            logger.info("[%s] ⚔️ Wild encounter %s%s has Battle button (no balls on screen). Clicking Battle until started...",
+                        account_name, poke_name, star_desc)
+            return await self.click_battle_button_until_started(client, account_name, message, battle_btn)
+
+        # =========================================================================
+        # CASE 2: KILL MODE (FARMING PD/EXP -> MUST BATTLE!)
         # =========================================================================
         if hunt_mode == "kill" and battle_btn:
             logger.info("[%s] ⚔️ [HUNT: KILL] Encountered %s! Clicking Battle button to start fight...",
@@ -257,7 +286,7 @@ class SpawnHandler:
             return await self.click_battle_button_until_started(client, account_name, message, battle_btn)
 
         # =========================================================================
-        # CATEGORY 2: CATCH MODE (THROWING POKÉBALLS)
+        # CASE 3: CATCH MODE (THROWING POKÉBALLS IF PRESENT DIRECTLY)
         # =========================================================================
         chosen_button = None
         chosen_ball_name = None
@@ -347,6 +376,9 @@ class SpawnHandler:
             self.stats["fled"] += 1
             logger.info("[%s] 💨 Pokémon fled or broke free. Total fled: %d",
                         account_name, self.stats["fled"])
+
+        # Clear star tracking for this encounter
+        self.starred_encounters.pop(account_name, None)
 
         # Release encounter lock so AutoHunter can proceed to the next cycle
         if self.on_catch_end:

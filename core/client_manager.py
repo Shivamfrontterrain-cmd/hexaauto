@@ -112,27 +112,27 @@ class ClientManager:
                 self.battle_handler.handle_battle_result(account_name, message)
                 return
 
-            # 6. Active Battle Turn (moves, balls, choices)
+            # 6. Check for catch outcome results
+            if self.spawn_handler and self.spawn_handler.is_catch_result(message):
+                self.spawn_handler.handle_catch_result(account_name, message)
+                return
+
+            # 7. Check for wild Pokémon encounter / spawn (outside battle)
+            if self.spawn_handler and self.spawn_handler.is_spawn_message(message):
+                await self.spawn_handler.handle_spawn(client, account_name, message)
+                return
+
+            # 8. Active Battle Turn (moves, balls, choices)
             if self.battle_handler and self.battle_handler.is_battle_message(message, account_name):
                 await self.battle_handler.handle_battle_turn(client, account_name, message)
                 return
 
-            # 7. Check for hunt cooldown report (e.g. "wait 7 seconds")
+            # 9. Check for hunt cooldown report (e.g. "wait 7 seconds")
             if self.auto_hunter:
                 cd = self.auto_hunter.extract_cooldown(raw_text)
                 if cd and ("hunt" in raw_text.lower() or "cooldown" in raw_text.lower()):
                     self.auto_hunter.set_cooldown(account_name, cd)
                     return
-
-            # 8. Check for catch outcome results
-            if self.spawn_handler and self.spawn_handler.is_catch_result(message):
-                self.spawn_handler.handle_catch_result(account_name, message)
-                return
-
-            # 9. Check for wild Pokémon encounter / spawn (outside battle)
-            if self.spawn_handler and self.spawn_handler.is_spawn_message(message):
-                await self.spawn_handler.handle_spawn(client, account_name, message)
-                return
 
     async def start_all(self, session_files: Optional[List[Path]] = None):
         """Discovers and starts multi-account clients concurrently."""

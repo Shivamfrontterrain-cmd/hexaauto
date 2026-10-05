@@ -649,6 +649,65 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         # Should have clicked at least twice before transition was detected!
         self.assertGreaterEqual(battle_btn.click.call_count, 2)
 
+    async def test_clefairy_wild_encounter_with_star_and_ev_yield_clicks_battle_then_repeat_ball(self):
+        """
+        Exact scenario from user screenshot:
+        1. Spawn: 'A wild Clefairy (Lv. 8) has appeared ☆' with buttons [Battle] | [EV Yield].
+        2. Must recognize as spawn, not active battle.
+        3. Must click [Battle], NOT [EV Yield].
+        4. When battle screen updates, must use Repeat Ball due to star '☆'.
+        """
+        import config
+        from handlers.spawn_handler import SpawnHandler
+        from handlers.battle_handler import BattleHandler
+        from core.pokedex import PokedexService
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+        spawn_handler = SpawnHandler(battle_handler=battle_handler)
+
+        config.HUNT_MODE = "catch"
+        config.BATTLE_SYSTEM = "catch"
+
+        # 1. Initial Wild Spawn message
+        spawn_msg = MagicMock()
+        spawn_msg.id = 555
+        spawn_msg.chat_id = 12345
+        spawn_msg.raw_text = "A wild Clefairy (Lv. 8) has appeared ☆"
+        btn_battle = MagicMock(text="Battle", click=AsyncMock())
+        btn_ev_yield = MagicMock(text="EV Yield", click=AsyncMock())
+        spawn_msg.buttons = [[btn_battle, btn_ev_yield]]
+
+        # Verify message classification
+        self.assertTrue(spawn_handler.is_spawn_message(spawn_msg))
+        self.assertFalse(battle_handler.is_battle_message(spawn_msg, "acc1"))
+
+        # 2. Battle Screen message returned after clicking Battle
+        battle_msg = MagicMock()
+        battle_msg.id = 555
+        battle_msg.chat_id = 12345
+        battle_msg.raw_text = "Battle begins\nWild Clefairy [Fairy]\nLv. 8 • HP 35/35"
+        btn_repeat = MagicMock(text="Repeat Ball x8", click=AsyncMock())
+        btn_poke = MagicMock(text="Poke Ball x15", click=AsyncMock())
+        btn_run = MagicMock(text="Run", click=AsyncMock())
+        battle_msg.buttons = [[btn_repeat, btn_poke], [btn_run]]
+
+        mock_client = AsyncMock()
+        mock_client.get_messages.return_value = battle_msg
+
+        # Handle spawn
+        success = await spawn_handler.handle_spawn(mock_client, "acc1", spawn_msg)
+        self.assertTrue(success)
+
+        # Must click Battle button!
+        btn_battle.click.assert_called()
+        # Must NEVER click EV Yield!
+        btn_ev_yield.click.assert_not_called()
+
+        # In battle turn, must throw Repeat Ball because Clefairy has '☆' star!
+        btn_repeat.click.assert_called_once()
+        btn_poke.click.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
 

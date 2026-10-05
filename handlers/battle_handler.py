@@ -12,13 +12,21 @@ from core.pokedex import PokedexService
 logger = logging.getLogger("autohexa.battle_handler")
 
 # Standard utility buttons in HeXamonbot
-UTILITY_BUTTON_NAMES = {
-    "run", "pokemons", "pokemon", "switch", "bag", "items", "cancel", "back", "info"
+# Standard battle utility buttons (Run, Pokemons, Switch, Bag)
+BATTLE_UTILITY_BUTTONS = {
+    "run", "pokemons", "pokemon", "switch", "bag", "items", "cancel", "back"
 }
 
-# Sub-menu and turn progression action buttons
+# Info and helper buttons (EV Yield, Pokedex, Info, Guide)
+INFO_BUTTON_NAMES = {
+    "ev yield", "ev", "yield", "pokedex", "dex", "info", "guide", "stats"
+}
+
+UTILITY_BUTTON_NAMES = BATTLE_UTILITY_BUTTONS | INFO_BUTTON_NAMES
+
+# Sub-menu and turn progression action buttons inside battles
 ACTION_BUTTON_NAMES = {
-    "continue", "next", "proceed", "fight", "attack", "moves", "ok", "go", ">>", "battle", "battles"
+    "continue", "next", "proceed", "fight", "attack", "moves", "ok", "go", ">>"
 }
 
 BALL_BUTTON_NAMES = {
@@ -35,6 +43,7 @@ class BattleHandler:
         self.pokedex = pokedex
         self.on_battle_end = on_battle_end
         self.active_battles: Dict[str, dict] = {}
+        self.starred_encounters: Dict[str, bool] = {}
         self.stats = {
             "battles_won": 0,
             "pd_earned": 0,
@@ -83,18 +92,25 @@ class BattleHandler:
             return False
 
         text = (message.raw_text or "").lower()
+
+        # Initial wild spawns (e.g. "appeared") belong to SpawnHandler, not BattleHandler
+        if any(w in text for w in ("appeared", "what will you do", "choose your ball")) and not any(
+            b in text for b in ("battle begins", "battle started", "current turn:", "turn:", "hp")
+        ):
+            return False
+
         buttons = message.buttons or []
 
         # 1. Button-based detection (most reliable indicator)
         if buttons:
             button_texts = [btn.text.strip().lower() for row in buttons for btn in row]
 
-            # Battle utility buttons (Run, Pokemons, Switch, Bag)
-            if any(any(u in b for u in UTILITY_BUTTON_NAMES) for b in button_texts):
+            # Battle utility buttons (Run, Pokemons, Switch, Bag) - excludes EV Yield
+            if any(any(u in b for u in BATTLE_UTILITY_BUTTONS) for b in button_texts):
                 return True
 
             # Action / sub-menu buttons (Fight, Attack, Moves, Continue, Next)
-            if any(any(a in b for a in ACTION_BUTTON_NAMES) for b in button_texts):
+            if any(any(re.search(rf"\b{re.escape(a)}\b", b) for a in ACTION_BUTTON_NAMES) for b in button_texts):
                 return True
 
             # Check if any button matches a known Pokémon move
@@ -206,8 +222,8 @@ class BattleHandler:
                 label = btn.text.strip()
                 label_lower = label.lower()
 
-                # 1. Check if it's a utility button
-                if any(u in label_lower for u in UTILITY_BUTTON_NAMES):
+                # 1. Check if it's a utility or info button (Run, Bag, Switch, EV Yield, etc.)
+                if any(u in label_lower for u in UTILITY_BUTTON_NAMES) or any(k in label_lower for k in ("ev", "yield", "pokedex", "dex", "info", "guide", "stat")):
                     utilities[label] = btn
                     continue
 
@@ -216,12 +232,17 @@ class BattleHandler:
                     balls[label] = btn
                     continue
 
-                # 3. Check if it's an action/continue/fight button (word-boundary check)
-                if any(re.search(rf"\b{re.escape(a)}\b", label_lower) for a in ACTION_BUTTON_NAMES) or ">>" in label_lower:
+                # 3. Check if it's an action/continue/fight or battle button
+                if any(k in label_lower for k in ("battle", "battles", "fight")) or any(re.search(rf"\b{re.escape(a)}\b", label_lower) for a in ACTION_BUTTON_NAMES) or ">>" in label_lower:
                     actions[label] = btn
                     continue
 
-                # 4. Otherwise, it's a move button!
+                # 4. Filter out any remaining non-move buttons
+                if any(k in label_lower for k in ("run", "bag", "switch", "pokemon", "item", "cancel")):
+                    utilities[label] = btn
+                    continue
+
+                # 5. Otherwise, it's a move button!
                 moves[label] = btn
 
         return moves, balls, utilities, actions
@@ -259,6 +280,11 @@ class BattleHandler:
         """Executes a battle decision based on Hunt Category ('kill' vs 'catch')."""
         raw_text = message.raw_text or ""
         state = self.parse_battle_state(raw_text)
+
+        # Inherit star status from spawn encounter if known
+        if self.starred_encounters.get(account_name, False):
+            state["has_star"] = True
+
         moves, balls, utils, actions = self.categorize_buttons(message)
 
         if not moves and not balls and not actions:
@@ -424,8 +450,9 @@ class BattleHandler:
 
     def handle_battle_result(self, account_name: str, message: Message):
         """Processes end of battle rewards and statistics."""
-        # Clear from active battles
+        # Clear from active battles and star tracking
         self.active_battles.pop(account_name, None)
+        self.starred_encounters.pop(account_name, None)
 
         text = message.raw_text or ""
         text_lower = text.lower()
