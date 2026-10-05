@@ -65,11 +65,10 @@ class GuessHandler:
         """Checks if the message reports the result of a guess."""
         clean = self._clean_text(message.raw_text or "")
         # Avoid matching wild battle conclusions
-        if any(w in clean for w in ["battle", "fainted", "wild", "turn", "lower"]):
+        if any(w in clean for w in ["battle", "fainted", "wild", "turn", "lower", "moves", "appeared"]):
             return False
-        if any(kw in clean for kw in ["correct", "its", "it is", "times up", "wrong", "guessed", "better luck"]):
-            if any(w in clean for w in ["pd", "pokemon", "correct", "exp", "guessed", "pokedollars", "luck"]):
-                return True
+        if any(kw in clean for kw in ["correct", "its", "it is", "times up", "wrong", "guessed", "better luck", "that was"]):
+            return True
         return False
 
     async def handle_challenge(self, client: TelegramClient, account_name: str, message: Message) -> bool:

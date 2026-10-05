@@ -75,26 +75,34 @@ class AutoGuesser:
                 continue
 
             # 4. Wait for the round to complete before sending next /guess
+            timeout_sec = 15.0 if getattr(config, "GUESS_INSTA_FLASH", True) else 35.0
             try:
                 logger.info("[%s] Waiting for /guess round to complete...", account_name)
-                await asyncio.wait_for(event.wait(), timeout=35.0)
+                await asyncio.wait_for(event.wait(), timeout=timeout_sec)
             except asyncio.TimeoutError:
-                logger.warning("[%s] /guess wait timed out after 35s. Unlocking for next cycle.", account_name)
+                logger.warning("[%s] /guess wait timed out after %.0fs. Unlocking for next cycle.", account_name, timeout_sec)
                 event.set()
 
             # 5. Determine post-guess sleep duration (cooldown + jitter)
             if account_name in self.cooldown_overrides:
                 cd = self.cooldown_overrides.pop(account_name)
-                jitter = random.uniform(1.0, config.GUESS_JITTER)
+                jitter = random.uniform(0.1, 0.4)
                 sleep_time = cd + jitter
                 logger.info("[%s] Respecting /guess cooldown: sleeping %.1fs (cd: %.1fs + jitter: %.1fs)",
                             account_name, sleep_time, cd, jitter)
             else:
-                jitter = random.uniform(0.5, config.GUESS_JITTER)
-                sleep_time = config.GUESS_INTERVAL + jitter
-                logger.info("[%s] Next /guess scheduled in %.1fs...", account_name, sleep_time)
+                if getattr(config, "GUESS_INSTA_FLASH", True):
+                    # Instant flash mode: send next /guess immediately!
+                    sleep_time = random.uniform(getattr(config, "GUESS_MIN_DELAY", 0.05), getattr(config, "GUESS_MAX_DELAY", 0.20))
+                    logger.info("[%s] ⚡ Instant-Flash: Round complete! Sending next '%s' in %.2fs!",
+                                account_name, config.GUESS_COMMAND, sleep_time)
+                else:
+                    jitter = random.uniform(0.5, config.GUESS_JITTER)
+                    sleep_time = config.GUESS_INTERVAL + jitter
+                    logger.info("[%s] Next /guess scheduled in %.1fs...", account_name, sleep_time)
 
-            await asyncio.sleep(sleep_time)
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
 
     def start_account(self, account_name: str, client: TelegramClient, index: int = 0):
         """Starts the auto-guess loop for an account."""
