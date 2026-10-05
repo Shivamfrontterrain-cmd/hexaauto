@@ -32,6 +32,8 @@ class ClientManager:
         self.battle_handler = battle_handler
         if self.spawn_handler and not getattr(self.spawn_handler, "battle_handler", None):
             self.spawn_handler.battle_handler = self.battle_handler
+        if self.battle_handler and not getattr(self.battle_handler, "spawn_handler", None):
+            self.battle_handler.spawn_handler = self.spawn_handler
         self.guess_handler = guess_handler
         self.auto_hunter = auto_hunter
         if self.auto_hunter:
@@ -109,14 +111,18 @@ class ClientManager:
                     self.auto_guesser.set_cooldown(account_name, gcd)
                     return
 
-            # 5. Battle result / conclusion (rewards, PD earned, fainted)
+            # 5. Battle result / conclusion (rewards, PD earned, fainted, caught)
             if self.battle_handler and self.battle_handler.is_battle_end(message):
                 self.battle_handler.handle_battle_result(account_name, message)
+                if self.spawn_handler and hasattr(self.spawn_handler, "active_encounters"):
+                    self.spawn_handler.active_encounters.pop(account_name, None)
                 return
 
             # 6. Check for catch outcome results
             if self.spawn_handler and self.spawn_handler.is_catch_result(message):
                 self.spawn_handler.handle_catch_result(account_name, message, client=client)
+                if self.battle_handler and hasattr(self.battle_handler, "active_battles"):
+                    self.battle_handler.active_battles.pop(account_name, None)
                 return
 
             # 7. Check for wild Pokémon encounter / spawn (outside battle)

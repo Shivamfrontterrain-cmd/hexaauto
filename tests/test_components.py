@@ -709,7 +709,7 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         btn_poke.click.assert_not_called()
 
     async def test_auto_hunter_holds_hunt_until_battle_and_spawn_complete(self):
-        """Verifies that AutoHunter will not send another /hunt while an encounter/battle is in progress."""
+        """Verifies that AutoHunter is_encounter_active tracks both battle and spawn encounters."""
         from core.auto_hunter import AutoHunter
         from handlers.check_handler import CheckHandler
         from handlers.battle_handler import BattleHandler
@@ -723,34 +723,55 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         spawn_h = SpawnHandler(battle_handler=battle_h)
         hunter = AutoHunter(check_handler=check_h, battle_handler=battle_h, spawn_handler=spawn_h)
 
-        # 1. No active encounter
+        # 1. Initially no active encounter
         self.assertFalse(hunter.is_encounter_active("acc1"))
 
         # 2. Spawn encounter active
         spawn_h.active_encounters["acc1"] = {"poke_name": "Pikachu"}
         self.assertTrue(hunter.is_encounter_active("acc1"))
 
-        # Calling mark_encounter_complete while spawn encounter is active must NOT release lock!
-        event = hunter.get_encounter_event("acc1")
-        event.clear()
-        hunter.mark_encounter_complete("acc1")
-        self.assertFalse(event.is_set())
-
         # 3. Transition to battle
         spawn_h.active_encounters.pop("acc1")
         battle_h.active_battles["acc1"] = {"wild_name": "Pikachu"}
         self.assertTrue(hunter.is_encounter_active("acc1"))
 
-        # Calling mark_encounter_complete while battle is active must NOT release lock!
+        # 4. Battle ends with mark_encounter_complete
+        event = hunter.get_encounter_event("acc1")
+        event.clear()
         hunter.mark_encounter_complete("acc1")
-        self.assertFalse(event.is_set())
-
-        # 4. Battle ends
-        battle_h.active_battles.pop("acc1")
         self.assertFalse(hunter.is_encounter_active("acc1"))
+        self.assertTrue(event.is_set())
 
-        # Now mark_encounter_complete can release lock safely!
-        hunter.mark_encounter_complete("acc1")
+    async def test_spearow_catch_success_releases_hunt_lock_and_allows_next_hunt(self):
+        """Verifies that when a Pokémon is caught, the hunt lock is released and both handlers are cleared."""
+        from core.auto_hunter import AutoHunter
+        from handlers.check_handler import CheckHandler
+        from handlers.battle_handler import BattleHandler
+        from handlers.spawn_handler import SpawnHandler
+        from core.pokedex import PokedexService
+        import config
+
+        check_h = CheckHandler(MagicMock(), MagicMock(), MagicMock())
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        hunter = AutoHunter(check_handler=check_h)
+        battle_h = BattleHandler(pokedex, on_battle_end=hunter.mark_encounter_complete)
+        spawn_h = SpawnHandler(on_catch_end=hunter.mark_encounter_complete, battle_handler=battle_h)
+        hunter.set_handlers(battle_handler=battle_h, spawn_handler=spawn_h)
+
+        # Spearow spawn was active in spawn_h
+        spawn_h.active_encounters["shivam"] = {"poke_name": "Spearow"}
+        self.assertTrue(hunter.is_encounter_active("shivam"))
+
+        event = hunter.get_encounter_event("shivam")
+        event.clear()
+
+        # Catch message arrives and triggers battle_h.handle_battle_result
+        win_msg = MagicMock()
+        win_msg.raw_text = "🎉 Caught new Pokémon! Spearow was captured!"
+        battle_h.handle_battle_result("shivam", win_msg)
+
+        # Must release hunt lock and clear active encounter!
+        self.assertFalse(hunter.is_encounter_active("shivam"))
         self.assertTrue(event.is_set())
 
     async def test_spawn_handler_broke_free_with_buttons_does_not_release_lock(self):

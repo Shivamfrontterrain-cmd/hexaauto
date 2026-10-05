@@ -49,13 +49,10 @@ class AutoHunter:
 
     def mark_encounter_complete(self, account_name: str):
         """Signals that the current hunt/battle has fully completed."""
-        # Double check: if battle or spawn handler still considers it active, don't unlock prematurely
-        if self.battle_handler and account_name in getattr(self.battle_handler, "active_battles", {}):
-            logger.debug("[%s] Encounter completion ignored: battle is still actively tracked.", account_name)
-            return
-        if self.spawn_handler and account_name in getattr(self.spawn_handler, "active_encounters", {}):
-            logger.debug("[%s] Encounter completion ignored: spawn encounter is still actively tracked.", account_name)
-            return
+        if self.battle_handler and hasattr(self.battle_handler, "active_battles"):
+            self.battle_handler.active_battles.pop(account_name, None)
+        if self.spawn_handler and hasattr(self.spawn_handler, "active_encounters"):
+            self.spawn_handler.active_encounters.pop(account_name, None)
 
         event = self.get_encounter_event(account_name)
         if not event.is_set():

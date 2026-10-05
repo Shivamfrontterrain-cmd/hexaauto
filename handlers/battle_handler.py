@@ -39,9 +39,10 @@ BALL_BUTTON_NAMES = {
 class BattleHandler:
     """Handles Pokémon battles for HeXamonbot with Kill/PD farming and Hybrid modes."""
 
-    def __init__(self, pokedex: PokedexService, on_battle_end=None):
+    def __init__(self, pokedex: PokedexService, on_battle_end=None, spawn_handler=None):
         self.pokedex = pokedex
         self.on_battle_end = on_battle_end
+        self.spawn_handler = spawn_handler
         self.active_battles: Dict[str, dict] = {}
         self.starred_encounters: Dict[str, bool] = {}
         self.stats = {
@@ -453,6 +454,8 @@ class BattleHandler:
         # Clear from active battles and star tracking
         self.active_battles.pop(account_name, None)
         self.starred_encounters.pop(account_name, None)
+        if self.spawn_handler and hasattr(self.spawn_handler, "active_encounters"):
+            self.spawn_handler.active_encounters.pop(account_name, None)
 
         text = message.raw_text or ""
         text_lower = text.lower()
