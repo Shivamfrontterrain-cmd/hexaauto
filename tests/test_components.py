@@ -1,0 +1,399 @@
+import asyncio
+import unittest
+from pathlib import Path
+import tempfile
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from core.knowledge_base import KnowledgeBase
+from handlers.check_handler import CheckHandler
+from core.gemini_solver import GeminiSolver
+from core.notifier import EmergencyNotifier
+
+class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self):
+        self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        self.temp_path = Path(self.temp_file.name)
+        self.temp_file.close()
+        initial_data = {
+            "how many moves can a pokemon know at the same time": "4",
+            "which ball has 100% catch rate": "Master Ball"
+        }
+        with open(self.temp_path, "w", encoding="utf-8") as f:
+            json.dump(initial_data, f)
+        self.kb = KnowledgeBase(self.temp_path)
+
+    async def asyncTearDown(self):
+        if self.temp_path.exists():
+            self.temp_path.unlink()
+
+    async def test_knowledge_base_exact_and_fuzzy(self):
+        # Exact match
+        ans = await self.kb.find_answer("How many moves can a Pokemon know at the same time?")
+        self.assertEqual(ans, "4")
+
+        # Case-insensitive & punctuation
+        ans2 = await self.kb.find_answer("HOW MANY MOVES CAN A POKEMON KNOW AT THE SAME TIME???")
+        self.assertEqual(ans2, "4")
+
+        # Substring / key match
+        ans3 = await self.kb.find_answer("Which ball has 100% catch rate in battles?")
+        self.assertEqual(ans3, "Master Ball")
+
+    async def test_knowledge_base_save_and_reload(self):
+        await self.kb.save_answer("What type is Pikachu?", "Electric")
+        ans = await self.kb.find_answer("What type is Pikachu?")
+        self.assertEqual(ans, "Electric")
+
+        # Reload from disk
+        reloaded_kb = KnowledgeBase(self.temp_path)
+        ans_reloaded = await reloaded_kb.find_answer("What type is Pikachu?")
+        self.assertEqual(ans_reloaded, "Electric")
+
+    async def test_check_handler_detection_and_extraction(self):
+        notifier = EmergencyNotifier(user_id=123)
+        solver = GeminiSolver(api_key="fake")
+        handler = CheckHandler(self.kb, solver, notifier)
+
+        # Mock message
+        mock_msg = MagicMock()
+        mock_msg.raw_text = "Just a quick check.\nHow many moves can a Pokemon know at the same time?\nAnswer within 30s."
+        
+        self.assertTrue(handler.is_check_message(mock_msg))
+        clean_q = handler.extract_question(mock_msg.raw_text)
+        self.assertIn("How many moves can a Pokemon know at the same time?", clean_q)
+        self.assertNotIn("Just a quick check", clean_q)
+
+    @patch("aiohttp.ClientSession.post")
+    async def test_gemini_solver_mock(self, mock_post):
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": '{"answer": "4", "confidence": 1.0, "explanation": "A Pokémon can only know up to 4 moves simultaneously."}'}
+                        ]
+                    }
+                }
+            ]
+        })
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        solver = GeminiSolver(api_key="test_key", model="gemini-2.5-flash")
+        ans, conf, reason = await solver.solve("How many moves can a Pokemon know at the same time?", ["2", "4", "6"])
+        self.assertEqual(ans, "4")
+        self.assertEqual(conf, 1.0)
+        self.assertIn("4 moves", reason)
+
+    async def test_spawn_handler_and_ball_selection(self):
+        from handlers.spawn_handler import SpawnHandler
+        spawn_handler = SpawnHandler()
+
+        mock_msg = MagicMock()
+        mock_msg.raw_text = "A wild Charizard appeared! Level 45."
+        self.assertTrue(spawn_handler.is_spawn_message(mock_msg))
+        self.assertEqual(spawn_handler.extract_pokemon_name(mock_msg.raw_text), "Charizard")
+
+        # Mock buttons
+        btn_poke = MagicMock()
+        btn_poke.text = "Pokeball (x15)"
+        btn_poke.click = AsyncMock()
+        btn_ultra = MagicMock()
+        btn_ultra.text = "Ultraball (x5)"
+        btn_ultra.click = AsyncMock()
+        btn_run = MagicMock()
+        btn_run.text = "Run"
+        btn_run.click = AsyncMock()
+        mock_msg.buttons = [[btn_poke, btn_ultra], [btn_run]]
+
+        mock_client = AsyncMock()
+        await spawn_handler.handle_spawn(mock_client, "test_account", mock_msg)
+        # Should click preferred Ultraball over Pokeball
+        btn_ultra.click.assert_called_once()
+        btn_poke.click.assert_not_called()
+
+        # Catch result stats
+        result_msg = MagicMock()
+        result_msg.raw_text = "Congratulations! You caught Charizard!"
+        self.assertTrue(spawn_handler.is_catch_result(result_msg))
+        spawn_handler.handle_catch_result("test_account", result_msg)
+        self.assertEqual(spawn_handler.stats["caught"], 1)
+
+    def test_auto_hunter_cooldown_parsing(self):
+        from core.auto_hunter import AutoHunter
+        from handlers.check_handler import CheckHandler
+        mock_ch = MagicMock(spec=CheckHandler)
+        mock_ch.paused_accounts = set()
+        hunter = AutoHunter(mock_ch)
+
+        cd = hunter.extract_cooldown("Please wait 8.5 seconds before hunting again.")
+        self.assertEqual(cd, 8.5)
+
+        cd2 = hunter.extract_cooldown("You can hunt again in 12s.")
+        self.assertEqual(cd2, 12.0)
+
+        cd3 = hunter.extract_cooldown("No cooldown mention here.")
+        self.assertIsNone(cd3)
+
+    async def test_battle_kill_mode_for_pd(self):
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+        config.BATTLE_SYSTEM = "kill"
+
+        mock_msg = MagicMock()
+        mock_msg.raw_text = (
+            "Battle begins\n\n"
+            "Wild Metapod [Bug]\n"
+            "Lv. 8 • HP 27/27\n"
+            "Lower Metapod's HP for a better chance of catching it\n\n"
+            "Current turn: Shivam\n"
+            "Charmander [Fire]\n"
+            "Lv. 5 • HP 19/19\n\n"
+            "Scratch [Normal]\n"
+            "Power: 40, Accuracy: 100\n"
+            "Ember [Fire]\n"
+            "Power: 40, Accuracy: 100"
+        )
+
+        btn_scratch = MagicMock(text="Scratch", click=AsyncMock())
+        btn_ember = MagicMock(text="Ember", click=AsyncMock())
+        btn_ball = MagicMock(text="Poke Ball", click=AsyncMock())
+        btn_run = MagicMock(text="Run", click=AsyncMock())
+        mock_msg.buttons = [[btn_scratch, btn_ember], [btn_ball, btn_run]]
+
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "test_account", mock_msg)
+
+        # In Kill Mode, Ember (super-effective Fire vs Bug) must be clicked!
+        btn_ember.click.assert_called_once()
+        btn_scratch.click.assert_not_called()
+        btn_ball.click.assert_not_called()
+
+        # Test battle victory with PD reward
+        win_msg = MagicMock()
+        win_msg.raw_text = "Wild Metapod fainted! You gained 180 exp and 350 PD!"
+        self.assertTrue(battle_handler.is_battle_end(win_msg))
+        battle_handler.handle_battle_result("test_account", win_msg)
+        self.assertEqual(battle_handler.stats["pd_earned"], 350)
+        self.assertEqual(battle_handler.stats["battles_won"], 1)
+
+    async def test_battle_hybrid_mode_with_star_repeat_ball(self):
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+        config.BATTLE_SYSTEM = "hybrid"
+
+        # Case 1: Pokémon has '☆' -> MUST THROW REPEAT BALL
+        mock_msg = MagicMock()
+        mock_msg.raw_text = (
+            "Battle begins\n\n"
+            "Wild Metapod ☆ [Bug]\n"
+            "Lv. 8 • HP 27/27\n\n"
+            "Current turn: Shivam\n"
+            "Charmander [Fire]"
+        )
+
+        btn_ember = MagicMock(text="Ember", click=AsyncMock())
+        btn_repeat = MagicMock(text="Repeat Ball", click=AsyncMock())
+        btn_poke = MagicMock(text="Poke Ball", click=AsyncMock())
+        mock_msg.buttons = [[btn_ember], [btn_repeat, btn_poke]]
+
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "test_account", mock_msg)
+
+        # Must choose Repeat Ball because of '☆'!
+        btn_repeat.click.assert_called_once()
+        btn_poke.click.assert_not_called()
+        btn_ember.click.assert_not_called()
+
+    def test_auto_hunter_encounter_lock(self):
+        from core.auto_hunter import AutoHunter
+        from handlers.check_handler import CheckHandler
+        mock_ch = MagicMock(spec=CheckHandler)
+        mock_ch.paused_accounts = set()
+        hunter = AutoHunter(mock_ch)
+
+        event = hunter.get_encounter_event("test_acc")
+        self.assertTrue(event.is_set())
+
+        # When hunt starts, lock is cleared
+        event.clear()
+        self.assertFalse(event.is_set())
+
+        # When battle ends or catch completes, lock is released
+        hunter.mark_encounter_complete("test_acc")
+        self.assertTrue(event.is_set())
+
+    async def test_battle_regular_ball_matching(self):
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+        config.BATTLE_SYSTEM = "hybrid"
+
+        mock_msg = MagicMock()
+        mock_msg.raw_text = (
+            "Battle begins\n\n"
+            "Wild Pidgey [Normal/Flying]\n"
+            "Lv. 3 • HP 15/15\n\n"
+            "Current turn: Shivam\n"
+            "Charmander [Fire]"
+        )
+
+        btn_regular = MagicMock(text="Regular Ball", click=AsyncMock())
+        btn_run = MagicMock(text="Run", click=AsyncMock())
+        mock_msg.buttons = [[btn_regular, btn_run]]
+
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "test_account", mock_msg)
+
+        # Must detect and click Regular Ball
+        btn_regular.click.assert_called_once()
+
+    @patch("aiohttp.ClientSession.post")
+    async def test_gemini_vision_silhouette_solver(self, mock_post):
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": '{"pokemon": "Shellder", "confidence": 1.0, "reasoning": "Classic shell silhouette"}'}
+                        ]
+                    }
+                }
+            ]
+        })
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        solver = GeminiSolver(api_key="AIzaSyMockKeyForTesting12345", model="gemini-2.5-flash")
+        poke, conf, reason = await solver.solve_pokemon_silhouette(b"fake_image_bytes")
+        self.assertEqual(poke, "Shellder")
+        self.assertEqual(conf, 1.0)
+
+    def test_sprite_matcher_silhouettes(self):
+        import config
+        from core.sprite_matcher import SpriteMatcher
+        matcher = SpriteMatcher(config.SPRITE_CACHE_FILE)
+        self.assertGreater(len(matcher.cache), 1000)
+
+        # Test on actual user silhouette if available
+        sample_img = Path(r"C:\Users\kalaw\.gemini\antigravity-ide\brain\d54bfd7e-a95f-40ed-9daa-e6925a345496\.user_uploaded\media_1791204089543.png")
+        if sample_img.exists():
+            name, conf = matcher.match_silhouette(sample_img.read_bytes())
+            self.assertEqual(name, "Glimmora")
+            self.assertGreaterEqual(conf, 0.95)
+
+    async def test_guess_handler_tier1_instant_match(self):
+        from handlers.guess_handler import GuessHandler
+        from core.sprite_matcher import SpriteMatcher
+
+        mock_gemini = MagicMock()
+        mock_gemini.solve_pokemon_silhouette = AsyncMock()
+
+        mock_matcher = MagicMock(spec=SpriteMatcher)
+        mock_matcher.match_silhouette.return_value = ("Glimmora", 0.99)
+
+        on_end_mock = MagicMock()
+        guess_handler = GuessHandler(
+            gemini_solver=mock_gemini,
+            sprite_matcher=mock_matcher,
+            on_guess_end=on_end_mock
+        )
+
+        mock_msg = MagicMock()
+        mock_msg.raw_text = "Who's that Pokémon?"
+        mock_msg.media = MagicMock()
+        mock_msg.download_media = AsyncMock(return_value=b"fake_sil_bytes")
+        mock_msg.reply = AsyncMock()
+
+        mock_client = AsyncMock()
+        success = await guess_handler.handle_challenge(mock_client, "test_account", mock_msg)
+        self.assertTrue(success)
+        mock_matcher.match_silhouette.assert_called_once_with(b"fake_sil_bytes")
+        # Tier 1 succeeded -> Gemini must NOT be called!
+        mock_gemini.solve_pokemon_silhouette.assert_not_called()
+        mock_msg.reply.assert_called_once_with("Glimmora")
+
+    async def test_guess_handler_tier2_gemini_fallback(self):
+        from handlers.guess_handler import GuessHandler
+        from core.sprite_matcher import SpriteMatcher
+
+        mock_gemini = MagicMock()
+        mock_gemini.solve_pokemon_silhouette = AsyncMock(return_value=("Pikachu", 0.95, "Silhouette match"))
+
+        mock_matcher = MagicMock(spec=SpriteMatcher)
+        mock_matcher.match_silhouette.return_value = (None, 0.0)
+
+        on_end_mock = MagicMock()
+        guess_handler = GuessHandler(
+            gemini_solver=mock_gemini,
+            sprite_matcher=mock_matcher,
+            on_guess_end=on_end_mock
+        )
+
+        mock_msg = MagicMock()
+        mock_msg.raw_text = "Who's that Pokémon?"
+        mock_msg.media = MagicMock()
+        mock_msg.download_media = AsyncMock(return_value=b"fake_sil_bytes")
+        mock_msg.reply = AsyncMock()
+
+        mock_client = AsyncMock()
+        success = await guess_handler.handle_challenge(mock_client, "test_account", mock_msg)
+        self.assertTrue(success)
+        mock_matcher.match_silhouette.assert_called_once_with(b"fake_sil_bytes")
+        # Tier 1 failed -> Fallback to Gemini Tier 2
+        mock_gemini.solve_pokemon_silhouette.assert_called_once_with(b"fake_sil_bytes")
+        mock_msg.reply.assert_called_once_with("Pikachu")
+
+    async def test_guess_handler_and_reward(self):
+        from handlers.guess_handler import GuessHandler
+
+        mock_solver = MagicMock()
+        mock_solver.solve_pokemon_silhouette = AsyncMock(return_value=("Shellder", 1.0, "Shell shape"))
+        on_end_mock = MagicMock()
+        guess_handler = GuessHandler(gemini_solver=mock_solver, on_guess_end=on_end_mock)
+
+        # Mock 'Who's that Pokémon?' challenge message with photo
+        mock_msg = MagicMock()
+        mock_msg.raw_text = "Who's that Pokémon?"
+        mock_msg.media = MagicMock()
+        mock_msg.download_media = AsyncMock(return_value=b"fake_image_data")
+        mock_msg.reply = AsyncMock()
+
+        self.assertTrue(guess_handler.is_guess_challenge(mock_msg))
+
+        mock_client = AsyncMock()
+        success = await guess_handler.handle_challenge(mock_client, "test_account", mock_msg)
+        self.assertTrue(success)
+        mock_msg.reply.assert_called_once_with("Shellder")
+
+        # Test reward / correct result
+        result_msg = MagicMock()
+        result_msg.raw_text = "Correct! It's Shellder! You gained 500 PD!"
+        self.assertTrue(guess_handler.is_guess_result(result_msg))
+        guess_handler.handle_result("test_account", result_msg)
+        self.assertEqual(guess_handler.stats["correct_guesses"], 1)
+        self.assertEqual(guess_handler.stats["pd_earned"], 500)
+        on_end_mock.assert_called_once_with("test_account")
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+
+

@@ -1,0 +1,32 @@
+# Environment variables and API credentials
+.env
+*.env
+!.env.example
+
+# Telegram session files (CRITICAL: Never commit raw session auth keys)
+sessions/*.session
+sessions/*.session-journal
+*.session
+*.session-journal
+
+# Python virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Logs
+*.log
