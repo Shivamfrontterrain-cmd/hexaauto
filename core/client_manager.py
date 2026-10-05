@@ -30,6 +30,8 @@ class ClientManager:
         self.check_handler = check_handler
         self.spawn_handler = spawn_handler
         self.battle_handler = battle_handler
+        if self.spawn_handler and not getattr(self.spawn_handler, "battle_handler", None):
+            self.spawn_handler.battle_handler = self.battle_handler
         self.guess_handler = guess_handler
         self.auto_hunter = auto_hunter
         self.auto_guesser = auto_guesser

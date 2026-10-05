@@ -70,10 +70,13 @@ async def main():
     auto_hunter = AutoHunter(check_handler=check_handler)
     auto_guesser = AutoGuesser(check_handler=check_handler)
 
-    spawn_handler = SpawnHandler(on_catch_end=auto_hunter.mark_encounter_complete)
     battle_handler = BattleHandler(
         pokedex=pokedex,
         on_battle_end=auto_hunter.mark_encounter_complete
+    )
+    spawn_handler = SpawnHandler(
+        on_catch_end=auto_hunter.mark_encounter_complete,
+        battle_handler=battle_handler
     )
     sprite_matcher = SpriteMatcher(config.SPRITE_CACHE_FILE)
     guess_handler = GuessHandler(

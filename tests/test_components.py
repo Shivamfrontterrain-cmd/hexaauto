@@ -517,6 +517,138 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         btn_ball.click.assert_called_once()
         btn_scratch.click.assert_not_called()
 
+    async def test_spawn_star_repeat_ball_priority(self):
+        """Verifies that '☆' star on wild encounter forces Repeat Ball selection over Master/Ultra."""
+        import config
+        from handlers.spawn_handler import SpawnHandler
+
+        spawn_handler = SpawnHandler()
+        config.HUNT_MODE = "catch"
+        config.BATTLE_SYSTEM = "catch"
+        config.PREFERRED_BALLS = ["Masterball", "Ultraball", "Greatball", "Repeatball", "Pokeball"]
+
+        msg = MagicMock()
+        msg.raw_text = "A wild Pidgey ☆ appeared! Level 14."
+        btn_master = MagicMock(text="Masterball (x1)", click=AsyncMock())
+        btn_ultra = MagicMock(text="Ultraball (x5)", click=AsyncMock())
+        btn_repeat = MagicMock(text="Repeatball (x12)", click=AsyncMock())
+        btn_poke = MagicMock(text="Pokeball (x20)", click=AsyncMock())
+        msg.buttons = [[btn_master, btn_ultra], [btn_repeat, btn_poke]]
+
+        mock_client = AsyncMock()
+        success = await spawn_handler.handle_spawn(mock_client, "acc1", msg)
+        self.assertTrue(success)
+
+        # MUST click Repeat Ball because of '☆' star!
+        btn_repeat.click.assert_called_once()
+        btn_master.click.assert_not_called()
+        btn_ultra.click.assert_not_called()
+        btn_poke.click.assert_not_called()
+
+    async def test_spawn_star_missing_repeat_falls_back(self):
+        """Verifies that if Repeat Ball is missing, star encounter falls back to preferred balls."""
+        import config
+        from handlers.spawn_handler import SpawnHandler
+
+        spawn_handler = SpawnHandler()
+        config.HUNT_MODE = "catch"
+        config.PREFERRED_BALLS = ["Ultraball", "Greatball", "Pokeball"]
+
+        msg = MagicMock()
+        msg.raw_text = "Wild Rattata ★ appeared! Level 6."
+        btn_ultra = MagicMock(text="Ultraball (x3)", click=AsyncMock())
+        btn_poke = MagicMock(text="Pokeball (x15)", click=AsyncMock())
+        msg.buttons = [[btn_ultra, btn_poke]]
+
+        mock_client = AsyncMock()
+        success = await spawn_handler.handle_spawn(mock_client, "acc1", msg)
+        self.assertTrue(success)
+
+        # Falls back to Ultraball
+        btn_ultra.click.assert_called_once()
+        btn_poke.click.assert_not_called()
+
+    async def test_spawn_kill_mode_clicks_battle_button(self):
+        """Verifies that in Kill mode, SpawnHandler clicks Battle button instead of throwing a ball."""
+        import config
+        from handlers.spawn_handler import SpawnHandler
+        from handlers.battle_handler import BattleHandler
+        from core.pokedex import PokedexService
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+        spawn_handler = SpawnHandler(battle_handler=battle_handler)
+
+        config.HUNT_MODE = "kill"
+        config.BATTLE_SYSTEM = "kill"
+
+        msg = MagicMock()
+        msg.id = 301
+        msg.chat_id = 888
+        msg.raw_text = "A wild Caterpie appeared!"
+        btn_battle = MagicMock(text="⚔️ Battle", click=AsyncMock())
+        btn_poke = MagicMock(text="Poke Ball", click=AsyncMock())
+        msg.buttons = [[btn_battle], [btn_poke]]
+
+        # Mock client to return an active battle message on re-fetch
+        battle_screen = MagicMock()
+        battle_screen.id = 301
+        battle_screen.chat_id = 888
+        battle_screen.raw_text = "Battle begins\nWild Caterpie [Bug] Lv. 3 • HP 12/12"
+        btn_tackle = MagicMock(text="Tackle", click=AsyncMock())
+        battle_screen.buttons = [[btn_tackle]]
+
+        mock_client = AsyncMock()
+        mock_client.get_messages.return_value = battle_screen
+
+        success = await spawn_handler.handle_spawn(mock_client, "acc1", msg)
+        self.assertTrue(success)
+
+        btn_battle.click.assert_called()
+        btn_poke.click.assert_not_called()
+
+    async def test_click_battle_button_until_started_retries(self):
+        """Verifies that click_battle_button_until_started keeps clicking until battle begins."""
+        import config
+        from handlers.spawn_handler import SpawnHandler
+        from handlers.battle_handler import BattleHandler
+        from core.pokedex import PokedexService
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+        spawn_handler = SpawnHandler(battle_handler=battle_handler)
+
+        msg = MagicMock()
+        msg.id = 401
+        msg.chat_id = 999
+        msg.raw_text = "A wild Pidgey appeared!"
+        battle_btn = MagicMock(text="Battle", click=AsyncMock())
+        msg.buttons = [[battle_btn]]
+
+        # Attempt 1: get_messages returns un-updated message (still has Battle button)
+        unupdated_msg = MagicMock()
+        unupdated_msg.id = 401
+        unupdated_msg.raw_text = "A wild Pidgey appeared!"
+        unupdated_msg.buttons = [[battle_btn]]
+
+        # Attempt 2: get_messages returns transitioned battle message
+        started_msg = MagicMock()
+        started_msg.id = 401
+        started_msg.chat_id = 999
+        started_msg.raw_text = "Battle begins!\nWild Pidgey Lv. 4 • HP 15/15"
+        started_msg.buttons = [[MagicMock(text="Scratch", click=AsyncMock())]]
+
+        mock_client = AsyncMock()
+        # First call returns unupdated_msg, second call returns started_msg
+        mock_client.get_messages.side_effect = [unupdated_msg, started_msg]
+
+        success = await spawn_handler.click_battle_button_until_started(
+            mock_client, "acc1", msg, battle_btn, max_attempts=5, click_interval=0.01
+        )
+        self.assertTrue(success)
+        # Should have clicked at least twice before transition was detected!
+        self.assertGreaterEqual(battle_btn.click.call_count, 2)
+
 if __name__ == "__main__":
     unittest.main()
 

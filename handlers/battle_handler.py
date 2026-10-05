@@ -18,7 +18,7 @@ UTILITY_BUTTON_NAMES = {
 
 # Sub-menu and turn progression action buttons
 ACTION_BUTTON_NAMES = {
-    "continue", "next", "proceed", "fight", "attack", "moves", "ok", "go", ">>"
+    "continue", "next", "proceed", "fight", "attack", "moves", "ok", "go", ">>", "battle", "battles"
 }
 
 BALL_BUTTON_NAMES = {
@@ -143,12 +143,12 @@ class BattleHandler:
             "my_max_hp": 1,
         }
 
-        # Check for star symbol '☆' (indicates already caught once)
-        if "☆" in text:
+        # Check for star symbol '☆' or unicode variants (indicates already caught once)
+        if any(s in text for s in ("☆", "★", "⭐", "🌟", "✨")) or "[☆" in text:
             state["has_star"] = True
 
         # Extract wild Pokémon: "Wild Metapod [Bug]" or "Wild Metapod ☆ [Bug]"
-        wild_match = re.search(r"wild\s+([A-Za-z0-9\-]+)(?:\s*☆)?\s*(?:\[(.*?)\])?", text, re.IGNORECASE)
+        wild_match = re.search(r"wild\s+([A-Za-z0-9\-]+)(?:\s*[☆★⭐🌟✨])?\s*(?:\[(.*?)\])?", text, re.IGNORECASE)
         if wild_match:
             state["wild_name"] = wild_match.group(1).title()
             if wild_match.group(2):
@@ -212,7 +212,7 @@ class BattleHandler:
                     continue
 
                 # 2. Check if it's a ball button (MUST check before actions so 'Poke Ball' isn't matched by 'ok')
-                if "ball" in label_lower or "regular" in label_lower:
+                if "ball" in label_lower or "regular" in label_lower or "repeat" in label_lower:
                     balls[label] = btn
                     continue
 
@@ -229,13 +229,14 @@ class BattleHandler:
     def _schedule_battle_watchdog(self, client: TelegramClient, account_name: str, chat_id: any, msg_id: int):
         """Schedules a safety watchdog to re-check the battle message if Telegram edit event was missed."""
         async def watchdog():
-            await asyncio.sleep(2.8)
+            watchdog_delay = 1.5 if getattr(config, "FAST_BATTLE", True) else 2.5
+            await asyncio.sleep(watchdog_delay)
             battle = self.active_battles.get(account_name)
             if not battle or battle.get("msg_id") != msg_id:
                 return
 
             now = asyncio.get_event_loop().time()
-            if now - battle.get("last_click", 0) < 2.5:
+            if now - battle.get("last_click", 0) < (watchdog_delay - 0.2):
                 return
 
             try:
@@ -295,10 +296,10 @@ class BattleHandler:
                 chosen_button = moves[best_move_name]
                 action_desc = f"[HUNT: KILL] Attacking with {best_move_name} (Damage score: {score:.1f})"
             elif actions:
-                # If there are continue/next or fight buttons
+                # If there are battle/continue/next or fight buttons
+                battle_btn = next((btn for label, btn in actions.items() if any(c in label.lower() for c in ("battle", "fight"))), None)
                 continue_btn = next((btn for label, btn in actions.items() if any(c in label.lower() for c in ("continue", "next", "proceed", ">>", "ok"))), None)
-                fight_btn = next((btn for label, btn in actions.items() if any(f in label.lower() for f in ("fight", "attack", "moves"))), None)
-                chosen_button = continue_btn or fight_btn or list(actions.values())[0]
+                chosen_button = battle_btn or continue_btn or list(actions.values())[0]
                 action_desc = f"[HUNT: KILL] Advancing battle turn with '{chosen_button.text}'"
             elif balls:
                 # Fallback if no moves are left (e.g. Struggle or out of PP)
