@@ -45,6 +45,7 @@ class SpawnHandler:
             self.starred_encounters = battle_handler.starred_encounters
         else:
             self.starred_encounters = {}
+        self.active_encounters: Dict[str, dict] = {}
         self.stats = {
             "encountered": 0,
             "caught": 0,
@@ -170,16 +171,19 @@ class SpawnHandler:
                 if self.battle_handler:
                     if self.battle_handler.is_battle_end(latest_msg):
                         logger.info("[%s] ⚔️ Battle ended immediately on msg_id %d!", account_name, msg_id)
+                        self.active_encounters.pop(account_name, None)
                         self.battle_handler.handle_battle_result(account_name, latest_msg)
                         return True
                     if self.battle_handler.is_battle_message(latest_msg, account_name) or has_battle_phrase or has_hp_indicator or has_battle_controls or has_ball_buttons:
                         logger.info("[%s] ⚔️ Battle confirmed started on msg_id %d (attempt %d)!", account_name, msg_id, attempt)
+                        self.active_encounters.pop(account_name, None)
                         await self.battle_handler.handle_battle_turn(client, account_name, latest_msg)
                         return True
 
                 # If battle button is no longer present on the message, it transitioned!
                 if not has_battle_btn and (latest_buttons or latest_text != (message.raw_text or "").lower()):
                     logger.info("[%s] ⚔️ Battle button disappeared; transition successful.", account_name)
+                    self.active_encounters.pop(account_name, None)
                     if self.battle_handler:
                         await self.battle_handler.handle_battle_turn(client, account_name, latest_msg)
                     return True
@@ -196,12 +200,14 @@ class SpawnHandler:
                     for r_msg in recent_msgs:
                         if self.battle_handler and self.battle_handler.is_battle_message(r_msg, account_name):
                             logger.info("[%s] ⚔️ New battle message detected in chat (msg_id %d)!", account_name, r_msg.id)
+                            self.active_encounters.pop(account_name, None)
                             await self.battle_handler.handle_battle_turn(client, account_name, r_msg)
                             return True
                 except Exception as e:
                     logger.debug("[%s] Error checking recent messages: %s", account_name, e)
 
         logger.warning("[%s] ⚠️ Battle button clicked %d times but battle did not confirm started.", account_name, max_attempts)
+        self.active_encounters.pop(account_name, None)
         if self.on_catch_end:
             try:
                 self.on_catch_end(account_name)
@@ -221,16 +227,36 @@ class SpawnHandler:
             hm = getattr(config, "HUNT_MODE", "kill").lower()
             hunt_mode = "catch" if hm in ("hybrid", "catch") else "kill"
 
-        if hunt_mode == "catch" and not config.AUTO_CATCH_ENABLED:
-            logger.info("[%s] Auto-catch is disabled in config. Skipping encounter.", account_name)
-            return False
-
         raw_text = message.raw_text or ""
         poke_name = self.extract_pokemon_name(raw_text)
         self.stats["encountered"] += 1
 
+        # Track active encounter so AutoHunter holds the next hunt
+        self.active_encounters[account_name] = {
+            "msg_id": message.id,
+            "chat_id": message.chat_id,
+            "poke_name": poke_name,
+            "time": asyncio.get_event_loop().time()
+        }
+
+        if hunt_mode == "catch" and not config.AUTO_CATCH_ENABLED:
+            logger.info("[%s] Auto-catch is disabled in config. Skipping encounter.", account_name)
+            self.active_encounters.pop(account_name, None)
+            if self.on_catch_end:
+                try:
+                    self.on_catch_end(account_name)
+                except Exception as e:
+                    logger.error("[%s] Error in on_catch_end callback: %s", account_name, e)
+            return False
+
         if not message.buttons:
             logger.warning("[%s] No buttons attached to spawn message for %s.", account_name, poke_name)
+            self.active_encounters.pop(account_name, None)
+            if self.on_catch_end:
+                try:
+                    self.on_catch_end(account_name)
+                except Exception as e:
+                    logger.error("[%s] Error in on_catch_end callback: %s", account_name, e)
             return False
 
         # Map available buttons
@@ -360,24 +386,45 @@ class SpawnHandler:
                 return True
             except Exception as e:
                 logger.error("[%s] Failed to click catch button: %s", account_name, e)
+                self.active_encounters.pop(account_name, None)
+                if self.on_catch_end:
+                    try:
+                        self.on_catch_end(account_name)
+                    except Exception as e2:
+                        logger.error("[%s] Error in on_catch_end callback: %s", account_name, e2)
                 return False
 
         logger.warning("[%s] Could not determine a catch or battle action for %s.", account_name, poke_name)
+        self.active_encounters.pop(account_name, None)
+        if self.on_catch_end:
+            try:
+                self.on_catch_end(account_name)
+            except Exception as e:
+                logger.error("[%s] Error in on_catch_end callback: %s", account_name, e)
         return False
 
-    def handle_catch_result(self, account_name: str, message: Message):
+    def handle_catch_result(self, account_name: str, message: Message, client: Optional[TelegramClient] = None):
         """Processes the outcome of a catch attempt and updates statistics."""
         text = (message.raw_text or "").lower()
+        has_buttons = bool(message.buttons)
+
+        # Check if Pokémon broke free but is still present with buttons (not fled!)
+        if ("broke free" in text or "escaped" in text) and has_buttons and client is not None:
+            logger.info("[%s] 💨 Pokémon broke free but is still present! Re-attempting catch...", account_name)
+            asyncio.create_task(self.handle_spawn(client, account_name, message))
+            return
+
         if "caught" in text or "congratulations" in text or "gotcha" in text:
             self.stats["caught"] += 1
             logger.info("[%s] 🎉 CATCH SUCCESS! Total caught: %d/%d",
                         account_name, self.stats["caught"], self.stats["encountered"])
         elif "broke free" in text or "fled" in text or "escaped" in text:
             self.stats["fled"] += 1
-            logger.info("[%s] 💨 Pokémon fled or broke free. Total fled: %d",
+            logger.info("[%s] 💨 Pokémon fled. Total fled: %d",
                         account_name, self.stats["fled"])
 
-        # Clear star tracking for this encounter
+        # Clear star tracking and active encounter for this account
+        self.active_encounters.pop(account_name, None)
         self.starred_encounters.pop(account_name, None)
 
         # Release encounter lock so AutoHunter can proceed to the next cycle

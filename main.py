@@ -78,6 +78,7 @@ async def main():
         on_catch_end=auto_hunter.mark_encounter_complete,
         battle_handler=battle_handler
     )
+    auto_hunter.set_handlers(battle_handler=battle_handler, spawn_handler=spawn_handler)
     sprite_matcher = SpriteMatcher(config.SPRITE_CACHE_FILE)
     guess_handler = GuessHandler(
         gemini_solver=gemini,

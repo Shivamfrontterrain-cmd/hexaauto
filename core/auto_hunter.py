@@ -13,12 +13,31 @@ logger = logging.getLogger("autohexa.auto_hunter")
 class AutoHunter:
     """Automated hunting engine that executes loops across all accounts."""
 
-    def __init__(self, check_handler: CheckHandler):
+    def __init__(self, check_handler: CheckHandler, battle_handler=None, spawn_handler=None):
         self.check_handler = check_handler
+        self.battle_handler = battle_handler
+        self.spawn_handler = spawn_handler
         self.is_running = True
         self.tasks: Dict[str, asyncio.Task] = {}
         self.cooldown_overrides: Dict[str, float] = {}
         self.encounter_events: Dict[str, asyncio.Event] = {}
+
+    def set_handlers(self, battle_handler=None, spawn_handler=None):
+        """Allows setting or updating handler references after initialization."""
+        if battle_handler is not None:
+            self.battle_handler = battle_handler
+        if spawn_handler is not None:
+            self.spawn_handler = spawn_handler
+
+    def is_encounter_active(self, account_name: str) -> bool:
+        """Returns True if the account is currently engaged in a wild spawn, battle, or anti-bot check."""
+        if account_name in self.check_handler.paused_accounts:
+            return True
+        if self.battle_handler and account_name in getattr(self.battle_handler, "active_battles", {}):
+            return True
+        if self.spawn_handler and account_name in getattr(self.spawn_handler, "active_encounters", {}):
+            return True
+        return False
 
     def get_encounter_event(self, account_name: str) -> asyncio.Event:
         """Returns or creates the encounter completion event for an account."""
@@ -30,6 +49,14 @@ class AutoHunter:
 
     def mark_encounter_complete(self, account_name: str):
         """Signals that the current hunt/battle has fully completed."""
+        # Double check: if battle or spawn handler still considers it active, don't unlock prematurely
+        if self.battle_handler and account_name in getattr(self.battle_handler, "active_battles", {}):
+            logger.debug("[%s] Encounter completion ignored: battle is still actively tracked.", account_name)
+            return
+        if self.spawn_handler and account_name in getattr(self.spawn_handler, "active_encounters", {}):
+            logger.debug("[%s] Encounter completion ignored: spawn encounter is still actively tracked.", account_name)
+            return
+
         event = self.get_encounter_event(account_name)
         if not event.is_set():
             logger.info("[%s] ✅ Encounter finished. Releasing hunt lock for next cycle.", account_name)
@@ -46,7 +73,9 @@ class AutoHunter:
         """Sets a temporary cooldown override reported by the game bot."""
         self.cooldown_overrides[account_name] = seconds
         # If bot reported cooldown, the hunt request was rejected, so release lock immediately
-        self.mark_encounter_complete(account_name)
+        event = self.get_encounter_event(account_name)
+        if not event.is_set():
+            event.set()
 
     async def _hunt_loop(self, account_name: str, client: TelegramClient, initial_delay: float):
         """Continuous hunt-and-catch loop for a single account."""
@@ -54,11 +83,13 @@ class AutoHunter:
         await asyncio.sleep(initial_delay)
 
         while self.is_running:
-            # 1. Check if account is paused due to an anti-bot check
-            if account_name in self.check_handler.paused_accounts:
-                logger.warning("[%s] Hunter waiting: anti-bot check resolution required before resuming...", account_name)
-                await asyncio.sleep(4.0)
-                continue
+            # 1. CRITICAL: Never send /hunt if an encounter or battle is already in progress!
+            while self.is_running and self.is_encounter_active(account_name):
+                logger.info("[%s] ⏳ Active encounter/battle in progress. Holding hunt command...", account_name)
+                await asyncio.sleep(1.0)
+
+            if not self.is_running:
+                break
 
             # 2. Acquire lock: Clear encounter event so we don't hunt again until this one completes!
             event = self.get_encounter_event(account_name)
@@ -76,12 +107,27 @@ class AutoHunter:
                 continue
 
             # 4. CRITICAL: Wait for current hunt encounter / battle to COMPLETELY finish before proceeding!
-            try:
-                logger.info("[%s] Waiting for current encounter/battle to finish before sending next /hunt...", account_name)
-                await asyncio.wait_for(event.wait(), timeout=60.0)
-            except asyncio.TimeoutError:
-                logger.warning("[%s] Encounter wait timed out after 60s. Unlocking for next cycle.", account_name)
-                event.set()
+            while self.is_running:
+                try:
+                    logger.info("[%s] Waiting for current encounter/battle to finish before sending next /hunt...", account_name)
+                    await asyncio.wait_for(event.wait(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    if self.is_encounter_active(account_name):
+                        logger.warning("[%s] ⏳ Encounter/battle still actively in progress after 60s. Continuing to wait...", account_name)
+                        continue
+                    else:
+                        logger.warning("[%s] Encounter wait timed out after 60s with no active encounter. Unlocking for next cycle.", account_name)
+                        event.set()
+                        break
+
+                # Confirm that all battle / spawn handlers have truly finished
+                if self.is_encounter_active(account_name):
+                    logger.info("[%s] ⏳ Hunt lock notified but encounter/battle is still active. Waiting...", account_name)
+                    event.clear()
+                    await asyncio.sleep(0.5)
+                    continue
+                else:
+                    break
 
             # 5. Determine post-encounter sleep duration (cooldown + human jitter)
             if account_name in self.cooldown_overrides:

@@ -34,6 +34,8 @@ class ClientManager:
             self.spawn_handler.battle_handler = self.battle_handler
         self.guess_handler = guess_handler
         self.auto_hunter = auto_hunter
+        if self.auto_hunter:
+            self.auto_hunter.set_handlers(battle_handler=self.battle_handler, spawn_handler=self.spawn_handler)
         self.auto_guesser = auto_guesser
         self.clients: Dict[str, TelegramClient] = {}
         self.sessions_dir = config.SESSIONS_DIR
@@ -114,7 +116,7 @@ class ClientManager:
 
             # 6. Check for catch outcome results
             if self.spawn_handler and self.spawn_handler.is_catch_result(message):
-                self.spawn_handler.handle_catch_result(account_name, message)
+                self.spawn_handler.handle_catch_result(account_name, message, client=client)
                 return
 
             # 7. Check for wild Pokémon encounter / spawn (outside battle)
@@ -127,10 +129,20 @@ class ClientManager:
                 await self.battle_handler.handle_battle_turn(client, account_name, message)
                 return
 
-            # 9. Check for hunt cooldown report (e.g. "wait 7 seconds")
+            # 9. Check for empty hunt result (e.g. "Nothing appeared in the grass")
+            if self.auto_hunter and any(p in raw_text.lower() for p in (
+                "found nothing", "nothing appeared", "no pokemon appeared",
+                "didn't find", "nothing was found", "searched the grass but",
+                "not a single pokemon", "no wild pokemon"
+            )):
+                logger.info("[%s] 🌾 No Pokémon spawned from hunt. Releasing hunt lock.", account_name)
+                self.auto_hunter.mark_encounter_complete(account_name)
+                return
+
+            # 10. Check for hunt cooldown report (e.g. "wait 7 seconds")
             if self.auto_hunter:
                 cd = self.auto_hunter.extract_cooldown(raw_text)
-                if cd and ("hunt" in raw_text.lower() or "cooldown" in raw_text.lower()):
+                if cd and ("hunt" in raw_text.lower() or "cooldown" in raw_text.lower() or "again" in raw_text.lower()):
                     self.auto_hunter.set_cooldown(account_name, cd)
                     return
 
