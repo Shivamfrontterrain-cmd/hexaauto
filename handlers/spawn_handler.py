@@ -115,10 +115,13 @@ class SpawnHandler:
             chosen_ball_name = first_btn.text.strip()
 
         if chosen_button:
-            # Simulated human reaction delay
-            delay = random.uniform(1.2, 2.6)
-            logger.info("[%s] Throwing %s in %.2fs...", account_name, chosen_ball_name, delay)
-            await asyncio.sleep(delay)
+            if getattr(config, "FAST_BATTLE", True):
+                delay = random.uniform(getattr(config, "FAST_BATTLE_MIN_DELAY", 0.05), getattr(config, "FAST_BATTLE_MAX_DELAY", 0.20))
+            else:
+                delay = random.uniform(1.2, 2.6)
+            logger.info("[%s] ⚡ Throwing %s in %.2fs...", account_name, chosen_ball_name, delay)
+            if delay > 0:
+                await asyncio.sleep(delay)
             try:
                 await chosen_button.click()
                 logger.info("[%s] Threw %s at %s!", account_name, chosen_ball_name, poke_name)

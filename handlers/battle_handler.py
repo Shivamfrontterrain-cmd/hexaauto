@@ -51,9 +51,11 @@ class BattleHandler:
     def is_battle_end(self, message: Message) -> bool:
         """Checks if a battle concluded (enemy fainted or captured)."""
         text = (message.raw_text or "").lower()
-        if "fainted" in text or "defeated" in text or "gained" in text and ("pd" in text or "exp" in text):
+        if "fainted" in text or "defeated" in text or ("gained" in text and ("pd" in text or "exp" in text)):
             return True
         if "congratulations" in text or "gotcha" in text or "was caught" in text:
+            return True
+        if "ran away" in text or "escaped" in text or "blacked out" in text or "whited out" in text:
             return True
         return False
 
@@ -260,9 +262,13 @@ class BattleHandler:
                         action_desc = f"[HYBRID] Out of balls -> Attacking {state['wild_name']} with {ranked[0][0]}"
 
         if chosen_button:
-            delay = random.uniform(1.2, 2.5)
-            logger.info("[%s] %s (in %.2fs)...", account_name, action_desc, delay)
-            await asyncio.sleep(delay)
+            if getattr(config, "FAST_BATTLE", True):
+                delay = random.uniform(getattr(config, "FAST_BATTLE_MIN_DELAY", 0.05), getattr(config, "FAST_BATTLE_MAX_DELAY", 0.20))
+            else:
+                delay = random.uniform(1.2, 2.5)
+            logger.info("[%s] ⚡ %s (in %.2fs)...", account_name, action_desc, delay)
+            if delay > 0:
+                await asyncio.sleep(delay)
             try:
                 await chosen_button.click()
                 return True

@@ -31,6 +31,14 @@ AUTO_HUNT_ENABLED = os.getenv("AUTO_HUNT_ENABLED", "True").lower() in ("true", "
 HUNT_COMMAND = os.getenv("HUNT_COMMAND", "/hunt")
 HUNT_INTERVAL = float(os.getenv("HUNT_INTERVAL", "12.0"))
 HUNT_JITTER = float(os.getenv("HUNT_JITTER", "3.0"))
+HUNT_INSTA_FLASH = os.getenv("HUNT_INSTA_FLASH", "True").lower() in ("true", "1", "yes")
+HUNT_MIN_DELAY = float(os.getenv("HUNT_MIN_DELAY", "0.05"))
+HUNT_MAX_DELAY = float(os.getenv("HUNT_MAX_DELAY", "0.20"))
+
+# Fast Battle & Catch settings (lightning-fast turn attacks and ball throws)
+FAST_BATTLE = os.getenv("FAST_BATTLE", "True").lower() in ("true", "1", "yes")
+FAST_BATTLE_MIN_DELAY = float(os.getenv("FAST_BATTLE_MIN_DELAY", "0.05"))
+FAST_BATTLE_MAX_DELAY = float(os.getenv("FAST_BATTLE_MAX_DELAY", "0.20"))
 
 # Auto-Guess settings (/guess "Who's that Pokémon?" PD farming)
 AUTO_GUESS_ENABLED = os.getenv("AUTO_GUESS_ENABLED", "True").lower() in ("true", "1", "yes")

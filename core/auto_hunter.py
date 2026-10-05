@@ -86,16 +86,23 @@ class AutoHunter:
             # 5. Determine post-encounter sleep duration (cooldown + human jitter)
             if account_name in self.cooldown_overrides:
                 cd = self.cooldown_overrides.pop(account_name)
-                jitter = random.uniform(1.0, config.HUNT_JITTER)
+                jitter = random.uniform(0.1, 0.4)
                 sleep_time = cd + jitter
                 logger.info("[%s] Respecting bot cooldown: sleeping %.1fs (cd: %.1fs + jitter: %.1fs)",
                             account_name, sleep_time, cd, jitter)
             else:
-                jitter = random.uniform(0.5, config.HUNT_JITTER)
-                sleep_time = config.HUNT_INTERVAL + jitter
-                logger.info("[%s] Next hunt scheduled in %.1fs...", account_name, sleep_time)
+                if getattr(config, "HUNT_INSTA_FLASH", True):
+                    # Instant flash mode: send next /hunt immediately!
+                    sleep_time = random.uniform(getattr(config, "HUNT_MIN_DELAY", 0.05), getattr(config, "HUNT_MAX_DELAY", 0.20))
+                    logger.info("[%s] ⚡ Instant-Flash: Encounter finished! Sending next '%s' in %.2fs!",
+                                account_name, config.HUNT_COMMAND, sleep_time)
+                else:
+                    jitter = random.uniform(0.5, config.HUNT_JITTER)
+                    sleep_time = config.HUNT_INTERVAL + jitter
+                    logger.info("[%s] Next hunt scheduled in %.1fs...", account_name, sleep_time)
 
-            await asyncio.sleep(sleep_time)
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
 
     def start_account(self, account_name: str, client: TelegramClient, index: int = 0):
         """Starts the auto-hunt loop for an account with a staggered start."""
