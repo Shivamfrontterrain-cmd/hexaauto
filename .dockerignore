@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.env
+sessions/*.session
+data/*.db
+data/*.db-wal
+data/*.db-shm
+.idea
+.vscode

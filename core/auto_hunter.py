@@ -21,6 +21,7 @@ class AutoHunter:
         self.tasks: Dict[str, asyncio.Task] = {}
         self.cooldown_overrides: Dict[str, float] = {}
         self.encounter_events: Dict[str, asyncio.Event] = {}
+        self.target_chats: Dict[str, str] = {}
 
     def set_handlers(self, battle_handler=None, spawn_handler=None):
         """Allows setting or updating handler references after initialization."""
@@ -94,7 +95,7 @@ class AutoHunter:
 
             # 3. Send the hunt command
             try:
-                target_chat = config.HUNT_CHAT
+                target_chat = self.target_chats.get(account_name) or config.HUNT_CHAT
                 logger.info("[%s] 🏹 Sending hunt command '%s' to %s...", account_name, config.HUNT_COMMAND, target_chat)
                 await client.send_message(target_chat, config.HUNT_COMMAND)
             except Exception as e:
@@ -135,9 +136,11 @@ class AutoHunter:
                             account_name, sleep_time, cd, jitter)
             else:
                 if getattr(config, "HUNT_INSTA_FLASH", True):
-                    # Instant flash mode: send next /hunt immediately!
-                    sleep_time = random.uniform(getattr(config, "HUNT_MIN_DELAY", 0.05), getattr(config, "HUNT_MAX_DELAY", 0.20))
-                    logger.info("[%s] ⚡ Instant-Flash: Encounter finished! Sending next '%s' in %.2fs!",
+                    # Safe flash mode: allow at least 1.0 - 1.5s for bot's battle session cleanup
+                    min_d = max(1.0, getattr(config, "HUNT_MIN_DELAY", 1.0))
+                    max_d = max(min_d + 0.3, getattr(config, "HUNT_MAX_DELAY", 1.5))
+                    sleep_time = random.uniform(min_d, max_d)
+                    logger.info("[%s] ⚡ Encounter finished! Sending next '%s' in %.2fs...",
                                 account_name, config.HUNT_COMMAND, sleep_time)
                 else:
                     jitter = random.uniform(0.5, config.HUNT_JITTER)
@@ -147,11 +150,14 @@ class AutoHunter:
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
 
-    def start_account(self, account_name: str, client: TelegramClient, index: int = 0):
+    def start_account(self, account_name: str, client: TelegramClient, index: int = 0, target_chat: Optional[str] = None):
         """Starts the auto-hunt loop for an account with a staggered start."""
         if account_name in self.tasks and not self.tasks[account_name].done():
             logger.warning("[%s] Auto-hunt worker is already running.", account_name)
             return
+
+        if target_chat:
+            self.target_chats[account_name] = target_chat
 
         initial_delay = 2.0 + (index * 3.5)
         task = asyncio.create_task(self._hunt_loop(account_name, client, initial_delay))

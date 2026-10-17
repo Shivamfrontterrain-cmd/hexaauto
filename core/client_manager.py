@@ -111,31 +111,41 @@ class ClientManager:
                     self.auto_guesser.set_cooldown(account_name, gcd)
                     return
 
-            # 5. Battle result / conclusion (rewards, PD earned, fainted, caught)
+            # 5. Battle result / conclusion (rewards, PD earned, fainted, caught, fled)
             if self.battle_handler and self.battle_handler.is_battle_end(message):
-                self.battle_handler.handle_battle_result(account_name, message)
+                self.battle_handler.handle_battle_result(account_name, message, client=client)
                 if self.spawn_handler and hasattr(self.spawn_handler, "active_encounters"):
                     self.spawn_handler.active_encounters.pop(account_name, None)
                 return
 
-            # 6. Check for catch outcome results
-            if self.spawn_handler and self.spawn_handler.is_catch_result(message):
-                self.spawn_handler.handle_catch_result(account_name, message, client=client)
-                if self.battle_handler and hasattr(self.battle_handler, "active_battles"):
-                    self.battle_handler.active_battles.pop(account_name, None)
-                return
-
-            # 7. Check for wild Pokémon encounter / spawn (outside battle)
-            if self.spawn_handler and self.spawn_handler.is_spawn_message(message):
-                await self.spawn_handler.handle_spawn(client, account_name, message)
-                return
-
-            # 8. Active Battle Turn (moves, balls, choices)
+            # 6. Active Battle Turn (moves, balls, choices in ongoing battle)
+            # MUST BE CHECKED BEFORE CATCH RESULT so battle turns with 'broke free' aren't hijacked!
             if self.battle_handler and self.battle_handler.is_battle_message(message, account_name):
                 await self.battle_handler.handle_battle_turn(client, account_name, message)
                 return
 
-            # 9. Check for empty hunt result (e.g. "Nothing appeared in the grass")
+            # 7. Check for catch outcome results (spawn catches or fled)
+            if self.spawn_handler and self.spawn_handler.is_catch_result(message):
+                self.spawn_handler.handle_catch_result(account_name, message, client=client)
+                return
+
+            # 8. Check for wild Pokémon encounter / spawn (outside battle)
+            if self.spawn_handler and self.spawn_handler.is_spawn_message(message):
+                await self.spawn_handler.handle_spawn(client, account_name, message)
+                return
+
+            # 9. Cannot hunt while in battle (Bot reported active battle)
+            if any(p in raw_text.lower() for p in (
+                "cannot hunt while in battle", "finish your current battle", "already in a battle"
+            )):
+                logger.warning("[%s] ⏳ Bot reported battle in progress. Holding hunt lock and resolving...", account_name)
+                if self.auto_hunter:
+                    event = self.auto_hunter.get_encounter_event(account_name)
+                    event.clear()
+                asyncio.create_task(self.resolve_stuck_battle(client, account_name, message.chat_id))
+                return
+
+            # 10. Check for empty hunt result (e.g. "Nothing appeared in the grass")
             if self.auto_hunter and any(p in raw_text.lower() for p in (
                 "found nothing", "nothing appeared", "no pokemon appeared",
                 "didn't find", "nothing was found", "searched the grass but",
@@ -145,12 +155,41 @@ class ClientManager:
                 self.auto_hunter.mark_encounter_complete(account_name)
                 return
 
-            # 10. Check for hunt cooldown report (e.g. "wait 7 seconds")
+            # 11. Check for hunt cooldown report (e.g. "wait 7 seconds")
             if self.auto_hunter:
                 cd = self.auto_hunter.extract_cooldown(raw_text)
                 if cd and ("hunt" in raw_text.lower() or "cooldown" in raw_text.lower() or "again" in raw_text.lower()):
                     self.auto_hunter.set_cooldown(account_name, cd)
                     return
+
+    async def resolve_stuck_battle(self, client: TelegramClient, account_name: str, chat_id: any):
+        """Finds any active battle message in chat to finish it, or waits for bot state to settle."""
+        try:
+            recent_msgs = await client.get_messages(chat_id, limit=6)
+            battle_msg = None
+            for msg in recent_msgs:
+                if self.battle_handler and self.battle_handler.is_battle_message(msg, account_name):
+                    battle_msg = msg
+                    break
+
+            if battle_msg:
+                logger.info("[%s] ⚔️ Found active battle message (id: %d)! Resuming battle turn...", account_name, battle_msg.id)
+                self.battle_handler.active_battles[account_name] = {
+                    "msg_id": battle_msg.id,
+                    "chat_id": chat_id,
+                    "last_click": asyncio.get_event_loop().time()
+                }
+                await self.battle_handler.handle_battle_turn(client, account_name, battle_msg)
+            else:
+                logger.info("[%s] ⏳ No active battle buttons found in recent messages. Waiting 2.5s for bot server to settle...", account_name)
+                await asyncio.sleep(2.5)
+                if self.auto_hunter:
+                    self.auto_hunter.mark_encounter_complete(account_name)
+        except Exception as e:
+            logger.error("[%s] Error resolving stuck battle: %s", account_name, e)
+            await asyncio.sleep(3.0)
+            if self.auto_hunter:
+                self.auto_hunter.mark_encounter_complete(account_name)
 
     async def start_all(self, session_files: Optional[List[Path]] = None):
         """Discovers and starts multi-account clients concurrently."""

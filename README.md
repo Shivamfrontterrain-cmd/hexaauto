@@ -41,7 +41,22 @@ Run the interactive session generator:
 ```
 Follow the prompts to enter your phone number and Telegram verification code. Session files are saved locally in `sessions/` (and never committed to git).
 
-### 3. Start the Bot
+### 3. Start AutoHexa
+
+You have two ways to run AutoHexa:
+
+#### Option A: Cloud Controller Telegram Bot (SaaS Mode - Recommended)
+Run the master Telegram Bot so anyone can add their number, enter OTP, and control their accounts directly via Telegram inline buttons:
+```bash
+.venv\Scripts\python.exe bot.py
+```
+1. Open your bot on Telegram and send `/start`.
+2. Click **➕ Add Account** and enter phone number.
+3. Enter the 5-digit verification code with spaces (e.g. `1 2 3 4 5`).
+4. Click **▶️ Start Auto** to begin automated farming in the cloud!
+
+#### Option B: Local CLI Mode
+Run directly from terminal using local `.session` files:
 ```bash
 .venv\Scripts\python.exe main.py
 ```
@@ -50,7 +65,7 @@ Follow the prompts to enter your phone number and Telegram verification code. Se
 
 ## 🧪 Testing
 
-Run the automated test suite covering all handlers, battle systems, sprite matching, and solver tiers:
+Run the automated test suite covering database models, multi-runner, handlers, battle systems, sprite matching, and solver tiers:
 ```bash
 .venv\Scripts\python.exe -m unittest discover tests
 ```

@@ -21,13 +21,13 @@ class EmergencyNotifier:
         """Dispatches an urgent alert to the user's personal Telegram."""
         opts_str = "\n".join([f"• {opt}" for opt in options]) if options else "None (text input required)"
         alert_text = (
-            "🚨 <b>EMERGENCY BOT-CHECK ALERT!</b> 🚨\n\n"
+            "<b>BOT CHECK ALERT</b>\n\n"
             f"<b>Account:</b> <code>{account_name}</code>\n"
             f"<b>Reason:</b> {reason}\n\n"
             f"<b>Question:</b>\n<i>{question}</i>\n\n"
             f"<b>Detected Buttons / Options:</b>\n{opts_str}\n\n"
-            "⚠️ <b>Action:</b> Automation has been <b>PAUSED</b> on this account to prevent a ban. "
-            "Please check the chat manually immediately!"
+            "<b>Action:</b> Automation has been <b>PAUSED</b> on this account to prevent account restrictions. "
+            "Please check the game chat manually immediately."
         )
 
         logger.critical("\n" + "="*50 + "\n" + alert_text + "\n" + "="*50)

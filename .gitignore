@@ -9,6 +9,14 @@ sessions/*.session-journal
 *.session
 *.session-journal
 
+# Database files
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.db
+*.db-wal
+*.db-shm
+
 # Python virtual environment
 .venv/
 venv/

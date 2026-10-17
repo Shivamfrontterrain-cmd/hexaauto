@@ -32,8 +32,14 @@ HUNT_COMMAND = os.getenv("HUNT_COMMAND", "/hunt")
 HUNT_INTERVAL = float(os.getenv("HUNT_INTERVAL", "12.0"))
 HUNT_JITTER = float(os.getenv("HUNT_JITTER", "3.0"))
 HUNT_INSTA_FLASH = os.getenv("HUNT_INSTA_FLASH", "True").lower() in ("true", "1", "yes")
-HUNT_MIN_DELAY = float(os.getenv("HUNT_MIN_DELAY", "0.05"))
-HUNT_MAX_DELAY = float(os.getenv("HUNT_MAX_DELAY", "0.20"))
+HUNT_MIN_DELAY = float(os.getenv("HUNT_MIN_DELAY", "1.0"))
+HUNT_MAX_DELAY = float(os.getenv("HUNT_MAX_DELAY", "1.5"))
+
+# Telegram Custom Emoji IDs for previously caught / owned Pokémon star (Repeat Ball)
+STAR_CUSTOM_EMOJI_IDS = [
+    int(x.strip()) for x in os.getenv("STAR_CUSTOM_EMOJI_IDS", "5258185631355378853").split(",")
+    if x.strip().isdigit()
+]
 
 # Fast Battle & Catch settings (lightning-fast turn attacks and ball throws)
 FAST_BATTLE = os.getenv("FAST_BATTLE", "True").lower() in ("true", "1", "yes")
@@ -68,18 +74,26 @@ HYBRID_KILL_COMMONS = os.getenv("HYBRID_KILL_COMMONS", "False").lower() in ("tru
 POKEDEX_FILE = BASE_DIR / "pokedex.json"
 ALERT_USER_ID = int(os.getenv("ALERT_USER_ID", "0"))
 ALERT_BOT_TOKEN = os.getenv("ALERT_BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", ALERT_BOT_TOKEN)
+ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", str(ALERT_USER_ID)).split(",") if x.strip() and x.strip() != "0"]
 
 # Human reaction delays (seconds)
 MIN_REACTION_DELAY = float(os.getenv("MIN_REACTION_DELAY", "2.5"))
 MAX_REACTION_DELAY = float(os.getenv("MAX_REACTION_DELAY", "5.0"))
 
-# Sessions directory
-SESSIONS_DIR = BASE_DIR / "sessions"
-SESSIONS_DIR.mkdir(exist_ok=True)
+# Storage directory for persistent database & sessions (supports Railway volume)
+STORAGE_DIR = Path(os.getenv("STORAGE_DIR", os.getenv("DATA_DIR", str(BASE_DIR / "data"))))
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Data directory
+# Static data directory shipped with the repository
 DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+
+# Path to database file
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(STORAGE_DIR / "autohexa.db")))
+
+# Sessions directory
+SESSIONS_DIR = Path(os.getenv("SESSIONS_DIR", str(STORAGE_DIR / "sessions")))
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Path to local knowledge base
 KNOWN_CHECKS_FILE = DATA_DIR / "known_checks.json"

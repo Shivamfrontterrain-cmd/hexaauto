@@ -7,7 +7,7 @@ from telethon import TelegramClient
 from telethon.tl.custom.message import Message
 
 import config
-from core.pokedex import PokedexService
+from core.pokedex import PokedexService, is_pokeball_button, check_has_star
 
 logger = logging.getLogger("autohexa.battle_handler")
 
@@ -39,18 +39,44 @@ BALL_BUTTON_NAMES = {
 class BattleHandler:
     """Handles Pokémon battles for HeXamonbot with Kill/PD farming and Hybrid modes."""
 
-    def __init__(self, pokedex: PokedexService, on_battle_end=None, spawn_handler=None):
+    def __init__(self, pokedex: PokedexService, on_battle_end=None, spawn_handler=None, hunt_mode: Optional[str] = None):
         self.pokedex = pokedex
         self.on_battle_end = on_battle_end
         self.spawn_handler = spawn_handler
+        self.hunt_mode = hunt_mode
+        self.account_modes: Dict[str, str] = {}
         self.active_battles: Dict[str, dict] = {}
         self.starred_encounters: Dict[str, bool] = {}
+        self.bag_opened: Dict[str, int] = {}
         self.stats = {
             "battles_won": 0,
             "pd_earned": 0,
             "caught_repeat": 0,
             "caught_regular": 0
         }
+
+    def set_hunt_mode(self, mode: str, account_name: Optional[str] = None):
+        """Sets the hunt/battle mode dynamically per instance or per account."""
+        if account_name:
+            self.account_modes[account_name] = mode
+        else:
+            self.hunt_mode = mode
+
+    def get_hunt_mode(self, account_name: Optional[str] = None) -> str:
+        """Resolves active hunt mode: account override -> instance override -> config fallback."""
+        if account_name and account_name in self.account_modes:
+            mode = self.account_modes[account_name].lower().strip()
+            return "catch" if mode in ("catch", "hybrid") else "kill"
+        if self.hunt_mode:
+            mode = self.hunt_mode.lower().strip()
+            return "catch" if mode in ("catch", "hybrid") else "kill"
+        bs = getattr(config, "BATTLE_SYSTEM", "").lower().strip()
+        if bs in ("hybrid", "catch"):
+            return "catch"
+        elif bs == "kill":
+            return "kill"
+        hm = getattr(config, "HUNT_MODE", "kill").lower().strip()
+        return "catch" if hm in ("hybrid", "catch") else "kill"
 
     def is_battle_end(self, message: Message) -> bool:
         """Checks if a battle concluded (enemy fainted or captured)."""
@@ -121,7 +147,7 @@ class BattleHandler:
                     return True
 
             # Check if buttons contain both Pokéballs and other choices in a wild/battle context
-            has_ball = any("ball" in b for b in button_texts)
+            has_ball = any(is_pokeball_button(b, self.pokedex) for b in button_texts)
             if has_ball and len(button_texts) > 1 and any(w in text for w in ("hp", "lv", "turn", "wild", "vs")):
                 return True
 
@@ -146,8 +172,15 @@ class BattleHandler:
 
         return False
 
-    def parse_battle_state(self, text: str) -> dict:
-        """Extracts wild Pokémon name, star symbol, HP, and player info from battle text."""
+    def parse_battle_state(self, message_or_text: any) -> dict:
+        """Extracts wild Pokémon name, star symbol, HP, and player info from battle text/message."""
+        if isinstance(message_or_text, str):
+            text = message_or_text
+            msg = None
+        else:
+            msg = message_or_text
+            text = (getattr(msg, "raw_text", "") or "") if msg else ""
+
         state = {
             "wild_name": "Unknown",
             "has_star": False,
@@ -160,8 +193,8 @@ class BattleHandler:
             "my_max_hp": 1,
         }
 
-        # Check for star symbol '☆' or unicode variants (indicates already caught once)
-        if any(s in text for s in ("☆", "★", "⭐", "🌟", "✨")) or "[☆" in text:
+        # Check for star symbol '☆', unicode variants, or Telegram Custom Emoji (5258185631355378853)
+        if check_has_star(msg, text):
             state["has_star"] = True
 
         # Extract wild Pokémon: "Wild Metapod [Bug]" or "Wild Metapod ☆ [Bug]"
@@ -228,8 +261,8 @@ class BattleHandler:
                     utilities[label] = btn
                     continue
 
-                # 2. Check if it's a ball button (MUST check before actions so 'Poke Ball' isn't matched by 'ok')
-                if "ball" in label_lower or "regular" in label_lower or "repeat" in label_lower:
+                # 2. Check if it's a genuine Pokéball button (MUST NEVER match moves like Electro Ball or Gyro Ball)
+                if is_pokeball_button(label, self.pokedex):
                     balls[label] = btn
                     continue
 
@@ -280,16 +313,17 @@ class BattleHandler:
     async def handle_battle_turn(self, client: TelegramClient, account_name: str, message: Message) -> bool:
         """Executes a battle decision based on Hunt Category ('kill' vs 'catch')."""
         raw_text = message.raw_text or ""
-        state = self.parse_battle_state(raw_text)
+        state = self.parse_battle_state(message)
 
-        # Inherit star status from spawn encounter if known
-        if self.starred_encounters.get(account_name, False):
+        # Inherit star status from spawn encounter if known, or persist if detected in battle
+        if self.starred_encounters.get(account_name, False) or state["has_star"]:
             state["has_star"] = True
+            self.starred_encounters[account_name] = True
 
-        moves, balls, utils, actions = self.categorize_buttons(message)
+        moves, balls, utilities, actions = self.categorize_buttons(message)
 
-        if not moves and not balls and not actions:
-            logger.warning("[%s] No moves, ball buttons, or action buttons available in battle turn.", account_name)
+        if not moves and not balls and not actions and not utilities:
+            logger.warning("[%s] No moves, ball buttons, bag/utility, or action buttons available in battle turn.", account_name)
             return False
 
         star_tag = " [☆ Caught]" if state["has_star"] else " [New]"
@@ -302,19 +336,13 @@ class BattleHandler:
         action_desc = ""
 
         # Determine Hunt Category: 'kill' vs 'catch'
-        bs = getattr(config, "BATTLE_SYSTEM", "").lower()
-        if bs in ("hybrid", "catch"):
-            hunt_mode = "catch"
-        elif bs == "kill":
-            hunt_mode = "kill"
-        else:
-            hm = getattr(config, "HUNT_MODE", "kill").lower()
-            hunt_mode = "catch" if hm in ("hybrid", "catch") else "kill"
+        hunt_mode = self.get_hunt_mode(account_name)
 
         # =========================================================================
         # CATEGORY 1: KILL MODE (FARMING PD - POKÉDOLLARS & EXP)
+        # Note: If Pokémon has '☆' star, ALWAYS use Repeat Ball catch regardless of kill mode!
         # =========================================================================
-        if hunt_mode == "kill":
+        if hunt_mode == "kill" and not state["has_star"]:
             if moves:
                 ranked = self.pokedex.rank_moves_for_damage(
                     list(moves.keys()), state["my_types"], state["wild_types"]
@@ -337,6 +365,22 @@ class BattleHandler:
         # CATEGORY 2: CATCH MODE (CAPTURE POKÉMON WITH BALLS)
         # =========================================================================
         else:
+            # Check if Bag / Items button is available to open Pokéballs
+            bag_btn = None
+            for label, btn in utilities.items():
+                if any(k in label.lower() for k in ("bag", "item", "backpack")) or "🎒" in label:
+                    bag_btn = btn
+                    break
+            if not bag_btn:
+                for label, btn in actions.items():
+                    if any(k in label.lower() for k in ("bag", "item", "backpack")) or "🎒" in label:
+                        bag_btn = btn
+                        break
+
+            # If balls are on screen, reset bag_opened tracker so future turns can re-open Bag if needed
+            if balls:
+                self.bag_opened.pop(account_name, None)
+
             # Rule 1: '☆' detected -> Pokémon was already caught once -> USE REPEAT BALL!
             if state["has_star"]:
                 repeat_btn = None
@@ -351,13 +395,17 @@ class BattleHandler:
                 elif balls:
                     chosen_button = list(balls.values())[0]
                     action_desc = f"[HUNT: CATCH] 🔁 Has '☆' but Repeat Ball missing -> Throwing {chosen_button.text}"
+                elif bag_btn and self.bag_opened.get(account_name) != message.id:
+                    self.bag_opened[account_name] = message.id
+                    chosen_button = bag_btn
+                    action_desc = f"[HUNT: CATCH] 🔁 [☆ Star Detected] Opening Bag to access Repeat Ball for {state['wild_name']}"
+                elif actions:
+                    chosen_button = list(actions.values())[0]
+                    action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
                 elif moves:
                     ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                     chosen_button = moves[ranked[0][0]]
                     action_desc = f"[HUNT: CATCH] No balls left -> Attacking {state['wild_name']} with {ranked[0][0]}"
-                elif actions:
-                    chosen_button = list(actions.values())[0]
-                    action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
 
             # Rule 2: Not caught yet (No '☆')
             else:
@@ -366,7 +414,7 @@ class BattleHandler:
                 if rarity in ("legendary", "mythical", "rare", "starter"):
                     # High priority catch: Ultra/Master Ball
                     target_ball_btn = None
-                    for pref in ["master", "ultra", "great", "poke"]:
+                    for pref in ["master", "ultra", "great", "poke", "regular"]:
                         for label, btn in balls.items():
                             if pref in label.lower():
                                 target_ball_btn = btn
@@ -377,6 +425,13 @@ class BattleHandler:
                     if target_ball_btn:
                         chosen_button = target_ball_btn
                         action_desc = f"[HUNT: CATCH] 🌟 {rarity.upper()} encounter -> Throwing {target_ball_btn.text} at {state['wild_name']}"
+                    elif balls:
+                        chosen_button = list(balls.values())[0]
+                        action_desc = f"[HUNT: CATCH] 🌟 Throwing {chosen_button.text} at {rarity} {state['wild_name']}"
+                    elif bag_btn and self.bag_opened.get(account_name) != message.id:
+                        self.bag_opened[account_name] = message.id
+                        chosen_button = bag_btn
+                        action_desc = f"[HUNT: CATCH] 🌟 Opening Bag to access Ultra/Master Ball for {rarity} {state['wild_name']}"
                     elif moves:
                         # Weaken carefully with safe move
                         safe_move, score = self.pokedex.find_safe_move_to_weaken(
@@ -389,14 +444,14 @@ class BattleHandler:
                         action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
                 else:
                     # Common Pokémon
-                    if config.HYBRID_KILL_COMMONS and moves:
+                    if hunt_mode == "hybrid" and getattr(config, "HYBRID_KILL_COMMONS", False) and moves:
                         ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                         best_move, score = ranked[0]
                         chosen_button = moves[best_move]
                         action_desc = f"[HUNT: CATCH] Defeating common {state['wild_name']} with {best_move} for PD"
                     elif balls:
                         regular_btn = None
-                        for pref in ["regular", "poke"]:
+                        for pref in ["regular", "poke", "great", "ultra", "master"]:
                             for label, btn in balls.items():
                                 if pref in label.lower():
                                     regular_btn = btn
@@ -404,14 +459,18 @@ class BattleHandler:
                             if regular_btn:
                                 break
                         chosen_button = regular_btn or list(balls.values())[0]
-                        action_desc = f"[HUNT: CATCH] Throwing {chosen_button.text} (Regular Ball) at common {state['wild_name']}"
+                        action_desc = f"[HUNT: CATCH] Throwing {chosen_button.text} at common {state['wild_name']}"
+                    elif bag_btn and self.bag_opened.get(account_name) != message.id:
+                        self.bag_opened[account_name] = message.id
+                        chosen_button = bag_btn
+                        action_desc = f"[HUNT: CATCH] 🎒 Opening Bag to access Pokéballs for common {state['wild_name']}"
+                    elif actions:
+                        chosen_button = list(actions.values())[0]
+                        action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
                     elif moves:
                         ranked = self.pokedex.rank_moves_for_damage(list(moves.keys()), state["my_types"], state["wild_types"])
                         chosen_button = moves[ranked[0][0]]
                         action_desc = f"[HUNT: CATCH] Out of balls -> Attacking {state['wild_name']} with {ranked[0][0]}"
-                    elif actions:
-                        chosen_button = list(actions.values())[0]
-                        action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
 
 
         if chosen_button:
@@ -449,20 +508,50 @@ class BattleHandler:
 
         return False
 
-    def handle_battle_result(self, account_name: str, message: Message):
+    def handle_battle_result(self, account_name: str, message: Message, client: Optional[TelegramClient] = None):
         """Processes end of battle rewards and statistics."""
-        # Clear from active battles and star tracking
+        # Dismiss any end screen buttons (Continue, Next, OK, Claim, Back) so bot clears battle state
+        if message and message.buttons:
+            for row in message.buttons:
+                for btn in row:
+                    clean = btn.text.strip().lower()
+                    if any(c in clean for c in ("continue", "next", "ok", "claim", "back", ">>", "proceed")):
+                        try:
+                            logger.info("[%s] 👆 Dismissing battle end screen button '%s'...", account_name, btn.text)
+                            asyncio.create_task(btn.click())
+                        except Exception as e:
+                            logger.debug("[%s] Error dismissing end button: %s", account_name, e)
+                        break
+
+        # Clear from active battles, bag tracking, and star tracking
         self.active_battles.pop(account_name, None)
         self.starred_encounters.pop(account_name, None)
+        self.bag_opened.pop(account_name, None)
         if self.spawn_handler and hasattr(self.spawn_handler, "active_encounters"):
             self.spawn_handler.active_encounters.pop(account_name, None)
 
-        text = message.raw_text or ""
+        text = (message.raw_text if message else "") or ""
         text_lower = text.lower()
 
         # Check for PD (Pokédollars) earned
         pd_match = re.search(r"(\d+(?:,\d+)?)\s*(?:pd|pokédollars|pokedollars)", text_lower)
-        if pd_match:
+        is_catch = False
+
+        if any(w in text_lower for w in ("caught", "congratulations", "gotcha", "was caught", "captured")):
+            is_catch = True
+            if "repeat" in text_lower or "☆" in text:
+                self.stats["caught_repeat"] += 1
+                logger.info("[%s] 🔁 Caught Pokémon with Repeat Ball! Total Repeat: %d",
+                            account_name, self.stats["caught_repeat"])
+            else:
+                self.stats["caught_regular"] += 1
+                logger.info("[%s] 🎉 Caught new Pokémon! Total: %d",
+                            account_name, self.stats["caught_regular"])
+            if pd_match:
+                pd_amount = int(pd_match.group(1).replace(",", ""))
+                self.stats["pd_earned"] += pd_amount
+
+        elif pd_match:
             pd_amount = int(pd_match.group(1).replace(",", ""))
             self.stats["pd_earned"] += pd_amount
             self.stats["battles_won"] += 1
@@ -474,19 +563,17 @@ class BattleHandler:
             logger.info("[%s] 💥 Wild Pokémon fainted/defeated! Battle won (Total: %d).",
                         account_name, self.stats["battles_won"])
 
-        elif "caught" in text_lower or "congratulations" in text_lower or "gotcha" in text_lower:
-            if "repeat" in text_lower or "☆" in text:
-                self.stats["caught_repeat"] += 1
-                logger.info("[%s] 🔁 Caught Pokémon with Repeat Ball! Total Repeat: %d",
-                            account_name, self.stats["caught_repeat"])
-            else:
-                self.stats["caught_regular"] += 1
-                logger.info("[%s] 🎉 Caught new Pokémon! Total: %d",
-                            account_name, self.stats["caught_regular"])
+        elif any(w in text_lower for w in ("fled", "ran away", "escaped", "flew away", "got away")):
+            logger.info("[%s] 💨 Wild Pokémon fled from battle. Encounter concluded.", account_name)
 
         # Signal that the battle has fully completed so AutoHunter can proceed to next hunt
         if self.on_battle_end:
             try:
-                self.on_battle_end(account_name)
+                import inspect
+                sig = inspect.signature(self.on_battle_end)
+                if "is_catch" in sig.parameters:
+                    self.on_battle_end(account_name, is_catch=is_catch)
+                else:
+                    self.on_battle_end(account_name)
             except Exception as e:
                 logger.error("[%s] Error in on_battle_end callback: %s", account_name, e)

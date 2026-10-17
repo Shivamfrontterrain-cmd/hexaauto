@@ -19,6 +19,7 @@ class AutoGuesser:
         self.tasks: Dict[str, asyncio.Task] = {}
         self.cooldown_overrides: Dict[str, float] = {}
         self.guess_events: Dict[str, asyncio.Event] = {}
+        self.target_chats: Dict[str, str] = {}
 
     def get_guess_event(self, account_name: str) -> asyncio.Event:
         """Returns or creates the guess completion event for an account."""
@@ -65,7 +66,7 @@ class AutoGuesser:
 
             # 3. Send /guess command
             try:
-                target_chat = config.HUNT_CHAT
+                target_chat = self.target_chats.get(account_name) or config.HUNT_CHAT
                 logger.info("[%s] ❓ Sending '%s' to %s...", account_name, config.GUESS_COMMAND, target_chat)
                 await client.send_message(target_chat, config.GUESS_COMMAND)
             except Exception as e:
@@ -104,7 +105,7 @@ class AutoGuesser:
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
 
-    def start_account(self, account_name: str, client: TelegramClient, index: int = 0):
+    def start_account(self, account_name: str, client: TelegramClient, index: int = 0, target_chat: Optional[str] = None):
         """Starts the auto-guess loop for an account."""
         if not config.AUTO_GUESS_ENABLED:
             logger.info("[%s] Auto-guess is disabled in config.", account_name)
@@ -113,6 +114,9 @@ class AutoGuesser:
         if account_name in self.tasks and not self.tasks[account_name].done():
             logger.warning("[%s] Auto-guess worker is already running.", account_name)
             return
+
+        if target_chat:
+            self.target_chats[account_name] = target_chat
 
         initial_delay = 3.0 + (index * 4.0)
         task = asyncio.create_task(self._guess_loop(account_name, client, initial_delay))

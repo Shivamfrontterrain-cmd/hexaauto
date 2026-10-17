@@ -802,6 +802,329 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.01)
         spawn_h.handle_spawn.assert_called_once()
 
+    async def test_catch_mode_with_electro_ball_move_does_not_attack_and_opens_bag(self):
+        """
+        Exact bug reported by user:
+        Player is in Catch mode. Pokémon has 'Electro Ball' and 'Gyro Ball' moves.
+        Moves must NOT be categorized as balls and must NOT be used to attack/kill the wild Pokémon.
+        Instead, BattleHandler must open Bag to access Pokéballs.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        config.HUNT_MODE = "catch"
+        config.BATTLE_SYSTEM = "catch"
+        config.HYBRID_KILL_COMMONS = False
+
+        msg = MagicMock()
+        msg.id = 1001
+        msg.chat_id = 999
+        msg.raw_text = "Battle begins\nWild Machop [Fighting]\nLv. 15 • HP 45/45\nCurrent turn: Shivam\nElectrode [Electric]"
+        btn_electro = MagicMock(text="Electro Ball", click=AsyncMock())
+        btn_gyro = MagicMock(text="Gyro Ball", click=AsyncMock())
+        btn_bag = MagicMock(text="Bag", click=AsyncMock())
+        btn_run = MagicMock(text="Run", click=AsyncMock())
+        msg.buttons = [[btn_electro, btn_gyro], [btn_bag, btn_run]]
+
+        moves, balls, utils, actions = battle_handler.categorize_buttons(msg)
+        self.assertIn("Electro Ball", moves)
+        self.assertIn("Gyro Ball", moves)
+        self.assertEqual(len(balls), 0)
+        self.assertIn("Bag", utils)
+
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "test_account", msg)
+
+        # Must NOT attack with Electro Ball or Gyro Ball!
+        btn_electro.click.assert_not_called()
+        btn_gyro.click.assert_not_called()
+        # Must click Bag!
+        btn_bag.click.assert_called_once()
+
+    async def test_catch_mode_throws_pokeball_from_bag(self):
+        """
+        After Bag is opened, Pokéballs are presented as buttons.
+        BattleHandler must choose the appropriate Pokéball and throw it.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        config.HUNT_MODE = "catch"
+        config.BATTLE_SYSTEM = "catch"
+        config.HYBRID_KILL_COMMONS = False
+
+        msg = MagicMock()
+        msg.id = 1002
+        msg.chat_id = 999
+        msg.raw_text = "Select a ball to catch Wild Machop:"
+        btn_poke = MagicMock(text="Poke Ball (x20)", click=AsyncMock())
+        btn_great = MagicMock(text="Great Ball (x10)", click=AsyncMock())
+        btn_back = MagicMock(text="<< Back", click=AsyncMock())
+        msg.buttons = [[btn_poke, btn_great], [btn_back]]
+
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "test_account", msg)
+
+        # Must throw Poke Ball at common Machop!
+        btn_poke.click.assert_called_once()
+        btn_great.click.assert_not_called()
+        btn_back.click.assert_not_called()
+
+    async def test_kill_mode_with_electro_ball_attacks_as_move(self):
+        """
+        In Kill mode, Electro Ball is recognized as a move and used to defeat the wild Pokémon for PD.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        config.HUNT_MODE = "kill"
+        config.BATTLE_SYSTEM = "kill"
+
+        msg = MagicMock()
+        msg.id = 1003
+        msg.chat_id = 999
+        msg.raw_text = "Battle begins\nWild Squirtle [Water]\nLv. 10 • HP 30/30\nCurrent turn: Shivam\nElectrode [Electric]"
+        btn_electro = MagicMock(text="Electro Ball", click=AsyncMock())
+        btn_bag = MagicMock(text="Bag", click=AsyncMock())
+        msg.buttons = [[btn_electro], [btn_bag]]
+
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "test_account", msg)
+
+        # Must use Electro Ball to attack Water-type Squirtle
+        btn_electro.click.assert_called_once()
+        btn_bag.click.assert_not_called()
+
+    def test_is_pokeball_button_precision(self):
+        """
+        Verifies that moves with 'ball' are not balls and real Pokéballs are recognized.
+        """
+        import config
+        from core.pokedex import PokedexService, is_pokeball_button
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+
+        # Moves must return False
+        moves = [
+            "Electro Ball", "Gyro Ball", "Shadow Ball", "Energy Ball",
+            "Mist Ball", "Weather Ball", "Ice Ball", "Pyro Ball", "Scratch"
+        ]
+        for m in moves:
+            self.assertFalse(is_pokeball_button(m, pokedex), f"Move '{m}' was incorrectly recognized as a Pokéball!")
+
+        # Real Pokéballs must return True
+        balls = [
+            "Poke Ball", "Pokeball (x15)", "Poké Ball", "Regular Ball", "Regular",
+            "Repeat Ball x8", "Ultraball (x5)", "Master Ball", "Great Ball", "Dusk Ball"
+        ]
+        for b in balls:
+            self.assertTrue(is_pokeball_button(b, pokedex), f"Pokéball '{b}' was not recognized as a Pokéball!")
+
+    def test_custom_emoji_star_id_detected_and_prioritizes_repeat_ball(self):
+        """
+        Exact user case (Image 2):
+        'A wild Toxicroak (Lv. 53) has appeared! [custom emoji star]'
+        Custom emoji ID is 5258185631355378853.
+        Must accurately identify the star and prioritize Repeat Ball.
+        """
+        import config
+        from core.pokedex import check_has_star
+        from handlers.spawn_handler import SpawnHandler
+
+        # Mock custom emoji entity from Telegram
+        custom_emoji_ent = MagicMock()
+        custom_emoji_ent.document_id = 5258185631355378853
+
+        msg = MagicMock()
+        msg.raw_text = "A wild Toxicroak (Lv. 53) has appeared!"
+        msg.entities = [custom_emoji_ent]
+
+        # 1. check_has_star must return True for custom emoji id 5258185631355378853
+        self.assertTrue(check_has_star(msg), "Custom emoji star ID 5258185631355378853 was not detected!")
+
+        # 2. SpawnHandler must select Repeat Ball for this encounter
+        spawn_handler = SpawnHandler()
+        btn_ultra = MagicMock(text="Ultraball (x10)", click=AsyncMock())
+        btn_repeat = MagicMock(text="Repeatball (x5)", click=AsyncMock())
+        btn_poke = MagicMock(text="Pokeball (x20)", click=AsyncMock())
+        msg.buttons = [[btn_ultra], [btn_repeat, btn_poke]]
+
+        mock_client = AsyncMock()
+        loop = asyncio.get_event_loop()
+        success = loop.run_until_complete(spawn_handler.handle_spawn(mock_client, "acc1", msg))
+        self.assertTrue(success)
+        btn_repeat.click.assert_called_once()
+        btn_ultra.click.assert_not_called()
+        btn_poke.click.assert_not_called()
+
+    def test_custom_emoji_star_in_battle_prioritizes_repeat_ball_or_bag(self):
+        """
+        Verifies that BattleHandler detects custom emoji star (5258185631355378853)
+        in battle turns and forces Repeat Ball catch (or Bag opening).
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_h = BattleHandler(pokedex)
+
+        custom_emoji_ent = MagicMock()
+        custom_emoji_ent.document_id = 5258185631355378853
+
+        msg = MagicMock()
+        msg.raw_text = "Battle began!\nWild Toxicroak [Poison/Fighting]\nHP 120/120"
+        msg.entities = [custom_emoji_ent]
+
+        btn_bag = MagicMock(text="🎒 Bag", click=AsyncMock())
+        btn_scratch = MagicMock(text="Scratch", click=AsyncMock())
+        msg.buttons = [[btn_scratch], [btn_bag]]
+
+        mock_client = AsyncMock()
+        loop = asyncio.get_event_loop()
+
+        # Should open Bag to access Repeat Ball because of star!
+        loop.run_until_complete(battle_h.handle_battle_turn(mock_client, "acc1", msg))
+        btn_bag.click.assert_called_once()
+        btn_scratch.click.assert_not_called()
+
+    def test_wild_pokemon_broke_free_in_battle_does_not_release_lock(self):
+        """
+        Exact user case (Image 1):
+        'Aww! Wild Purugly broke free! Wild Purugly used Play Rough It dealt 10 damage!'
+        Buttons: [Fight] [Bag] [Run]
+        Encounter/battle lock MUST NOT be released, and turn must be routed to battle handler.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+        from handlers.spawn_handler import SpawnHandler
+        from core.auto_hunter import AutoHunter
+        from handlers.check_handler import CheckHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        check_h = CheckHandler(MagicMock(), MagicMock(), MagicMock())
+        hunter = AutoHunter(check_handler=check_h)
+        battle_h = BattleHandler(pokedex, on_battle_end=hunter.mark_encounter_complete)
+        spawn_h = SpawnHandler(on_catch_end=hunter.mark_encounter_complete, battle_handler=battle_h)
+        hunter.set_handlers(battle_handler=battle_h, spawn_handler=spawn_h)
+
+        # Battle is actively in progress
+        battle_h.active_battles["acc1"] = {"msg_id": 100, "wild_name": "Purugly"}
+        event = hunter.get_encounter_event("acc1")
+        event.clear()
+
+        # Message where Purugly broke free and attacked
+        msg = MagicMock()
+        msg.raw_text = (
+            "Aww! Wild Purugly broke free!\n\n"
+            "Wild Purugly used Play Rough\n"
+            "It dealt 10 damage!\n"
+            "It's not very effective...\n\n"
+            "Current turn: Shivam\n"
+            "Purugly [Normal]\n"
+            "HP: 45/60"
+        )
+        btn_fight = MagicMock(text="Fight", click=AsyncMock())
+        btn_bag = MagicMock(text="Bag", click=AsyncMock())
+        btn_run = MagicMock(text="Run", click=AsyncMock())
+        msg.buttons = [[btn_fight, btn_bag, btn_run]]
+
+        # 1. is_battle_message must be True
+        self.assertTrue(battle_h.is_battle_message(msg, "acc1"))
+
+        # 2. is_catch_result must be False for active battle turn
+        self.assertFalse(spawn_h.is_catch_result(msg))
+
+        # 3. Encounter must still be active and event must remain cleared (no /hunt allowed)
+        self.assertTrue(hunter.is_encounter_active("acc1"))
+        self.assertFalse(event.is_set())
+
+    def test_wild_pokemon_fled_ends_battle_and_releases_lock(self):
+        """
+        Verifies that when 'Wild Purugly fled from the battle!' arrives,
+        the battle conclusion is properly processed and releases hunt lock.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+        from core.auto_hunter import AutoHunter
+        from handlers.check_handler import CheckHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        check_h = CheckHandler(MagicMock(), MagicMock(), MagicMock())
+        hunter = AutoHunter(check_handler=check_h)
+        battle_h = BattleHandler(pokedex, on_battle_end=hunter.mark_encounter_complete)
+
+        battle_h.active_battles["acc1"] = {"msg_id": 100, "wild_name": "Purugly"}
+        event = hunter.get_encounter_event("acc1")
+        event.clear()
+
+        fled_msg = MagicMock()
+        fled_msg.raw_text = "Wild Purugly fled from the battle!"
+        fled_msg.buttons = []
+
+        # is_battle_end must detect fled
+        self.assertTrue(battle_h.is_battle_end(fled_msg))
+
+        battle_h.handle_battle_result("acc1", fled_msg)
+
+        # Active battles must be cleared and hunt lock released
+        self.assertNotIn("acc1", battle_h.active_battles)
+        self.assertTrue(event.is_set())
+
+    async def test_resolve_stuck_battle_when_bot_reports_cannot_hunt(self):
+        """
+        Verifies that when 'Cannot hunt while in battle!' arrives,
+        resolve_stuck_battle handles pending turns or unlocks cleanly after waiting.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+        from handlers.spawn_handler import SpawnHandler
+        from core.client_manager import ClientManager
+        from core.auto_hunter import AutoHunter
+        from handlers.check_handler import CheckHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        check_h = CheckHandler(MagicMock(), MagicMock(), MagicMock())
+        hunter = AutoHunter(check_handler=check_h)
+        battle_h = BattleHandler(pokedex, on_battle_end=hunter.mark_encounter_complete)
+        spawn_h = SpawnHandler(on_catch_end=hunter.mark_encounter_complete, battle_handler=battle_h)
+
+        manager = ClientManager(
+            check_handler=check_h,
+            spawn_handler=spawn_h,
+            battle_handler=battle_h,
+            auto_hunter=hunter
+        )
+
+        mock_client = AsyncMock()
+        # Case A: An active battle message exists in chat
+        active_turn_msg = MagicMock()
+        active_turn_msg.id = 55
+        active_turn_msg.raw_text = "Wild Purugly [Normal]\nHP: 30/60\nYour turn"
+        btn_scratch = MagicMock(text="Scratch", click=AsyncMock())
+        active_turn_msg.buttons = [[btn_scratch]]
+
+        mock_client.get_messages = AsyncMock(return_value=[active_turn_msg])
+        battle_h.handle_battle_turn = AsyncMock()
+
+        await manager.resolve_stuck_battle(mock_client, "acc1", 12345)
+        battle_h.handle_battle_turn.assert_called_once_with(mock_client, "acc1", active_turn_msg)
+
 if __name__ == "__main__":
     unittest.main()
 
