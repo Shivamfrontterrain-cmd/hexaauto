@@ -7,14 +7,15 @@ from telethon import TelegramClient
 from telethon.tl.custom.message import Message
 
 import config
-from core.pokedex import PokedexService, is_pokeball_button, check_has_star
+from core.pokedex import PokedexService, is_pokeball_button, is_pokeball_menu_button, check_has_star
 
 logger = logging.getLogger("autohexa.battle_handler")
 
 # Standard utility buttons in HeXamonbot
-# Standard battle utility buttons (Run, Pokemons, Switch, Bag)
+# Standard battle utility buttons (Run, Pokemons, Switch, Bag, Pokeballs)
 BATTLE_UTILITY_BUTTONS = {
-    "run", "pokemons", "pokemon", "switch", "bag", "items", "cancel", "back"
+    "run", "pokemons", "pokemon", "switch", "bag", "items", "item", "cancel", "back",
+    "pokeballs", "pokéballs", "poke balls", "poké balls", "balls", "throw ball"
 }
 
 # Info and helper buttons (EV Yield, Pokedex, Info, Guide)
@@ -256,8 +257,10 @@ class BattleHandler:
                 label = btn.text.strip()
                 label_lower = label.lower()
 
-                # 1. Check if it's a utility or info button (Run, Bag, Switch, EV Yield, etc.)
-                if any(u in label_lower for u in UTILITY_BUTTON_NAMES) or any(k in label_lower for k in ("ev", "yield", "pokedex", "dex", "info", "guide", "stat")):
+                # 1. Check if it's a utility, pokeball menu, or info button (Run, Bag, Pokeballs, Switch, EV Yield, etc.)
+                if (is_pokeball_menu_button(label) or
+                    any(u in label_lower for u in UTILITY_BUTTON_NAMES) or
+                    any(k in label_lower for k in ("ev", "yield", "pokedex", "dex", "info", "guide", "stat"))):
                     utilities[label] = btn
                     continue
 
@@ -365,16 +368,36 @@ class BattleHandler:
         # CATEGORY 2: CATCH MODE (CAPTURE POKÉMON WITH BALLS)
         # =========================================================================
         else:
-            # Check if Bag / Items button is available to open Pokéballs
-            bag_btn = None
+            # Check for Pokéball menu opener button (e.g. 'Pokeballs', 'Pokéballs', 'Balls', 'Bag')
+            pokeballs_menu_btn = None
+            # 1. Highest priority: dedicated Pokéball menu buttons (Pokeballs, Pokéballs, Balls, Throw Ball)
             for label, btn in utilities.items():
-                if any(k in label.lower() for k in ("bag", "item", "backpack")) or "🎒" in label:
-                    bag_btn = btn
+                if is_pokeball_menu_button(label) and not any(k in label.lower() for k in ("bag", "backpack")):
+                    pokeballs_menu_btn = btn
                     break
-            if not bag_btn:
+            if not pokeballs_menu_btn:
                 for label, btn in actions.items():
-                    if any(k in label.lower() for k in ("bag", "item", "backpack")) or "🎒" in label:
-                        bag_btn = btn
+                    if is_pokeball_menu_button(label) and not any(k in label.lower() for k in ("bag", "backpack")):
+                        pokeballs_menu_btn = btn
+                        break
+
+            # 2. Second priority: Bag / Backpack buttons
+            if not pokeballs_menu_btn:
+                for label, btn in utilities.items():
+                    if any(k in label.lower() for k in ("bag", "backpack")) or "🎒" in label:
+                        pokeballs_menu_btn = btn
+                        break
+            if not pokeballs_menu_btn:
+                for label, btn in actions.items():
+                    if any(k in label.lower() for k in ("bag", "backpack")) or "🎒" in label:
+                        pokeballs_menu_btn = btn
+                        break
+
+            # 3. Last fallback: Item button ONLY if no moves are available and no other menu button exists
+            if not pokeballs_menu_btn and not moves:
+                for label, btn in utilities.items():
+                    if "item" in label.lower():
+                        pokeballs_menu_btn = btn
                         break
 
             # If balls are on screen, reset bag_opened tracker so future turns can re-open Bag if needed
@@ -403,11 +426,11 @@ class BattleHandler:
                 if repeat_btn:
                     chosen_button = repeat_btn
                     action_desc = f"[HUNT: CATCH] 🔁 Pokémon has '☆' -> Throwing Repeat Ball at {state['wild_name']}"
-                elif bag_btn and self.bag_opened.get(account_name) != message.id:
-                    # Repeat Ball is not on screen, but Bag is available -> OPEN BAG!
+                elif pokeballs_menu_btn and (self.bag_opened.get(account_name) != message.id or not moves):
+                    # Repeat Ball is not on screen, but Pokeballs menu / Bag is available -> OPEN POKEBALLS MENU!
                     self.bag_opened[account_name] = message.id
-                    chosen_button = bag_btn
-                    action_desc = f"[HUNT: CATCH] 🔁 [☆ Star Detected] Opening Bag to access Repeat Ball for {state['wild_name']}"
+                    chosen_button = pokeballs_menu_btn
+                    action_desc = f"[HUNT: CATCH] 🔁 [☆ Star Detected] Opening Pokéballs menu via '{pokeballs_menu_btn.text}' to access Repeat Ball for {state['wild_name']}"
                 elif balls:
                     # Repeat Ball is truly missing (e.g. out of stock in Bag) -> throw fallback ball
                     fallback_ball_btn = None
@@ -451,10 +474,10 @@ class BattleHandler:
                     elif balls:
                         chosen_button = list(balls.values())[0]
                         action_desc = f"[HUNT: CATCH] 🌟 Throwing {chosen_button.text} at {rarity} {state['wild_name']}"
-                    elif bag_btn and self.bag_opened.get(account_name) != message.id:
+                    elif pokeballs_menu_btn and (self.bag_opened.get(account_name) != message.id or not moves):
                         self.bag_opened[account_name] = message.id
-                        chosen_button = bag_btn
-                        action_desc = f"[HUNT: CATCH] 🌟 Opening Bag to access Ultra/Master Ball for {rarity} {state['wild_name']}"
+                        chosen_button = pokeballs_menu_btn
+                        action_desc = f"[HUNT: CATCH] 🌟 Opening Pokéballs menu via '{pokeballs_menu_btn.text}' to access Ultra/Master Ball for {rarity} {state['wild_name']}"
                     elif moves:
                         # Weaken carefully with safe move
                         safe_move, score = self.pokedex.find_safe_move_to_weaken(
@@ -481,12 +504,13 @@ class BattleHandler:
                                     break
                             if regular_btn:
                                 break
+
                         chosen_button = regular_btn or list(balls.values())[0]
                         action_desc = f"[HUNT: CATCH] Throwing {chosen_button.text} at common {state['wild_name']}"
-                    elif bag_btn and self.bag_opened.get(account_name) != message.id:
+                    elif pokeballs_menu_btn and (self.bag_opened.get(account_name) != message.id or not moves):
                         self.bag_opened[account_name] = message.id
-                        chosen_button = bag_btn
-                        action_desc = f"[HUNT: CATCH] 🎒 Opening Bag to access Pokéballs for common {state['wild_name']}"
+                        chosen_button = pokeballs_menu_btn
+                        action_desc = f"[HUNT: CATCH] 🎒 Opening Pokéballs menu via '{pokeballs_menu_btn.text}' to access Pokéballs for common {state['wild_name']}"
                     elif actions:
                         chosen_button = list(actions.values())[0]
                         action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"

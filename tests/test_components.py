@@ -1257,6 +1257,125 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(check_has_star(msg), "Custom emoji in wild spawn was not recognized as star!")
 
+    def test_is_pokeball_menu_button_distinction(self):
+        """
+        Tests that menu opener buttons ('Pokeballs', 'Balls', 'Bag') are distinguished from
+        throwable balls ('Repeat (x15)', 'Poke Ball (x50)') and item buttons ('Item').
+        """
+        from core.pokedex import is_pokeball_button, is_pokeball_menu_button
+
+        menu_buttons = ["Pokeballs", "Pokéballs", "Poke Balls", "Poké Balls", "Balls", "Throw Ball", "Bag", "🎒 Bag", "🎒"]
+        for mb in menu_buttons:
+            self.assertTrue(is_pokeball_menu_button(mb), f"'{mb}' was not recognized as a Pokéball menu button!")
+            self.assertFalse(is_pokeball_button(mb), f"Menu button '{mb}' was incorrectly recognized as a throwable ball!")
+
+        throwable_balls = ["Repeat Ball", "Repeat (x15)", "Repeat", "Poke Ball (x50)", "Pokeball (x20)", "Ultra Ball", "Ultraball (x5)", "Greatball"]
+        for tb in throwable_balls:
+            self.assertFalse(is_pokeball_menu_button(tb), f"Throwable ball '{tb}' was incorrectly recognized as a menu button!")
+            self.assertTrue(is_pokeball_button(tb), f"Throwable ball '{tb}' was not recognized as a throwable Pokéball!")
+
+        non_ball_buttons = ["Item", "Items", "Switch", "Run", "Electro Ball", "Gyro Ball"]
+        for nb in non_ball_buttons:
+            self.assertFalse(is_pokeball_menu_button(nb), f"'{nb}' should not be a Pokéball menu button!")
+            self.assertFalse(is_pokeball_button(nb), f"'{nb}' should not be a throwable Pokéball!")
+
+    async def test_florges_star_battle_clicks_pokeballs_menu_not_item(self):
+        """
+        Exact user glitch scenario:
+        Wild : ☆ Florges (Orange Flower) [ Fairy 🌸 ]
+        Level : 36 | HP : 109/109
+        Corviknight [ Flying / Steel ] (Lv 100)
+        Moves: Giga Impact, Heavy Slam, Steel Beam, Brave Bird
+        Row 3: Switch, Run, Pokeballs
+        Row 4: Item
+
+        Must click [Pokeballs] to open ball menu!
+        Must NOT click [Item]!
+        Must NOT attack with [Giga Impact]!
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        msg = MagicMock()
+        msg.id = 8881
+        msg.chat_id = 999
+        msg.raw_text = (
+            "A wild Florges (Orange Flower) (Lv. 36) has appeared! ☆\n\n"
+            "Wild : ☆ Florges (Orange Flower) [ Fairy 🌸 ]\n"
+            "Level : 36 | HP : 109/109\n\n"
+            "Turn : None\n"
+            "Corviknight [ Flying / Steel ]\n"
+            "Level : 100 | HP : 375/375\n\n"
+            "• Giga Impact [ Normal ]\n"
+            "• Heavy Slam [ Steel ]\n"
+            "• Steel Beam [ Steel ]\n"
+            "• Brave Bird [ Flying ]"
+        )
+        btn_giga = MagicMock(text="Giga Impact", click=AsyncMock())
+        btn_heavy = MagicMock(text="Heavy Slam", click=AsyncMock())
+        btn_beam = MagicMock(text="Steel Beam", click=AsyncMock())
+        btn_bird = MagicMock(text="Brave Bird", click=AsyncMock())
+        btn_switch = MagicMock(text="Switch", click=AsyncMock())
+        btn_run = MagicMock(text="Run", click=AsyncMock())
+        btn_pokeballs = MagicMock(text="Pokeballs", click=AsyncMock())
+        btn_item = MagicMock(text="Item", click=AsyncMock())
+
+        msg.buttons = [
+            [btn_giga, btn_heavy],
+            [btn_beam, btn_bird],
+            [btn_switch, btn_run, btn_pokeballs],
+            [btn_item]
+        ]
+
+        # Step 1: Categorize buttons
+        moves, balls, utils, actions = battle_handler.categorize_buttons(msg)
+        self.assertIn("Giga Impact", moves)
+        self.assertIn("Pokeballs", utils)
+        self.assertIn("Item", utils)
+        self.assertNotIn("Pokeballs", balls, "Pokeballs menu button must not be categorized as a throwable ball!")
+        self.assertEqual(len(balls), 0)
+
+        # Step 2: Handle battle turn
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "acc_florges", msg)
+
+        # Must click Pokeballs!
+        btn_pokeballs.click.assert_called_once()
+        # Must NOT click Item!
+        btn_item.click.assert_not_called()
+        # Must NOT attack!
+        btn_giga.click.assert_not_called()
+        btn_heavy.click.assert_not_called()
+
+        # Step 3: Next turn after clicking Pokeballs, submenu is open
+        msg_submenu = MagicMock()
+        msg_submenu.id = 8881
+        msg_submenu.chat_id = 999
+        msg_submenu.raw_text = msg.raw_text
+
+        btn_poke = MagicMock(text="Poke Ball (x50)", click=AsyncMock())
+        btn_great = MagicMock(text="Great Ball (x20)", click=AsyncMock())
+        btn_ultra = MagicMock(text="Ultra Ball (x10)", click=AsyncMock())
+        btn_repeat = MagicMock(text="Repeat Ball (x15)", click=AsyncMock())
+        btn_back = MagicMock(text="Back", click=AsyncMock())
+
+        msg_submenu.buttons = [
+            [btn_poke, btn_great],
+            [btn_ultra, btn_repeat],
+            [btn_back]
+        ]
+
+        await battle_handler.handle_battle_turn(mock_client, "acc_florges", msg_submenu)
+
+        # Must throw Repeat Ball!
+        btn_repeat.click.assert_called_once()
+        btn_poke.click.assert_not_called()
+        btn_back.click.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
 

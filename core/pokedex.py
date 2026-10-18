@@ -47,17 +47,70 @@ POKEBALL_TYPE_PREFIXES = (
 NON_BALL_BUTTON_KEYWORDS = (
     "run", "bag", "switch", "pokemon", "pokemons", "back", "cancel",
     "battle", "battles", "fight", "attack", "continue", "next", "proceed",
-    "ev yield", "yield", "pokedex", "dex", "info", "guide", "stat", "stats"
+    "ev yield", "yield", "pokedex", "dex", "info", "guide", "stat", "stats",
+    "item", "items"
 )
+
+POKEBALL_MENU_KEYWORDS = (
+    "pokeballs", "pokéballs", "poke balls", "poké balls",
+    "balls", "throw ball", "throw balls", "throw pokeball", "throw pokeballs",
+    "throw pokéball", "throw pokéballs", "choose ball", "choose balls",
+    "select ball", "select balls", "bag", "backpack"
+)
+
+def is_pokeball_menu_button(label: str) -> bool:
+    """
+    Accurately determines whether a button is a menu opener to access Pokéballs
+    (e.g. 'Pokeballs', 'Pokéballs', 'Poke Balls', 'Balls', 'Throw Ball', 'Bag', '🎒').
+    These buttons open the Pokéball submenu and are NOT individual throwable Pokéballs.
+    """
+    if not label:
+        return False
+
+    clean = label.strip().lower()
+    if "🎒" in label:
+        return True
+
+    clean_no_brackets = re.sub(r"[\(\[\{].*?[\)\]\}]", "", clean).strip()
+    clean_alpha = re.sub(r"[^a-z0-9]", "", clean_no_brackets)
+
+    if clean_no_brackets in POKEBALL_MENU_KEYWORDS or clean in POKEBALL_MENU_KEYWORDS:
+        return True
+
+    if clean_alpha in (
+        "pokeballs", "balls", "throwball", "throwballs",
+        "throwpokeball", "throwpokeballs", "chooseball", "chooseballs",
+        "selectball", "bag", "backpack"
+    ):
+        return True
+
+    # Plural 'balls' starting with 'poke' / 'poké' (e.g. 'Pokeballs', 'Pokéballs')
+    if (clean_alpha.startswith("poke") or clean_alpha.startswith("poké")) and clean_alpha.endswith("balls"):
+        return True
+
+    # Plural 'balls' not associated with a specific single ball name
+    if clean_alpha.endswith("balls") and not any(clean_alpha.startswith(p) for p in (
+        "great", "ultra", "master", "safari", "fast", "level", "lure", "heavy", "love",
+        "friend", "moon", "sport", "park", "net", "dive", "nest", "repeat", "timer",
+        "luxury", "premier", "dusk", "heal", "quick", "cherish", "dream", "beast"
+    )):
+        return True
+
+    return False
 
 def is_pokeball_button(label: str, pokedex: Optional["PokedexService"] = None) -> bool:
     """
-    Accurately determines whether a Telegram button represents a Pokéball.
+    Accurately determines whether a Telegram button represents a throwable Pokéball.
     Explicitly filters out attack moves like 'Electro Ball', 'Gyro Ball', and 'Shadow Ball'.
+    Explicitly filters out menu opener buttons like 'Pokeballs', 'Balls', 'Bag'.
     Recognizes formats with or without 'ball': e.g. 'Repeat Ball', 'Repeatball',
     'Repeat (x10)', 'Repeat x5', 'Repeat', '🔁 Repeat', 'Ultra (x5)', etc.
     """
     if not label:
+        return False
+
+    # 0. Menu opener buttons (Pokeballs, Bag, etc.) are NEVER individual throwable Pokéballs!
+    if is_pokeball_menu_button(label):
         return False
 
     clean = re.sub(r"[\(\[\{].*?[\)\]\}]", "", label)
@@ -82,12 +135,12 @@ def is_pokeball_button(label: str, pokedex: Optional["PokedexService"] = None) -
         if pokedex.get_move(cleaned_stripped):
             return False
 
-    # 4. Exact matches for standard Pokéballs
+    # 4. Exact matches for standard Pokéballs (singular)
     if clean_lower in ("regular", "regularball", "regular ball", "pokeball", "poke ball", "poké ball", "pokéball"):
         return True
 
     # 5. Ball with valid Pokéball type prefix (e.g. Ultra Ball, Repeat Ball, Great Ball, etc.)
-    if ("ball" in clean_lower or "balls" in clean_lower) and any(p in clean_lower for p in POKEBALL_TYPE_PREFIXES):
+    if "ball" in clean_lower and any(p in clean_lower for p in POKEBALL_TYPE_PREFIXES):
         return True
 
     # 6. Button text matching a Pokéball prefix even without the word 'ball' (e.g. 'Repeat', 'Repeat (x12)', 'Ultra', 'Great', 'Master')
@@ -95,7 +148,7 @@ def is_pokeball_button(label: str, pokedex: Optional["PokedexService"] = None) -
     if clean_alpha in POKEBALL_TYPE_PREFIXES:
         return True
     for p in POKEBALL_TYPE_PREFIXES:
-        if clean_alpha.startswith(p) and (len(clean_alpha) == len(p) or clean_alpha.endswith("ball") or clean_alpha.endswith("balls")):
+        if clean_alpha.startswith(p) and (len(clean_alpha) == len(p) or clean_alpha.endswith("ball")):
             return True
 
     return False

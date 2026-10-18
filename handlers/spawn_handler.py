@@ -7,7 +7,7 @@ from telethon import TelegramClient
 from telethon.tl.custom.message import Message
 
 import config
-from core.pokedex import is_pokeball_button, check_has_star
+from core.pokedex import is_pokeball_button, is_pokeball_menu_button, check_has_star
 
 logger = logging.getLogger("autohexa.spawn_handler")
 
@@ -361,18 +361,28 @@ class SpawnHandler:
                 logger.info("[%s] 🔁 [☆ Star Detected] Wild encounter has '☆' -> Prioritizing Repeat Ball for %s!",
                             account_name, poke_name)
             else:
-                # Check if Bag / Items button is present to access Repeat Ball
-                bag_btn = None
+                # Check for Pokéball menu button (e.g. 'Pokeballs', 'Balls', 'Bag')
+                pokeballs_menu_btn = None
                 for label, btn in button_map.items():
-                    clean = label.replace(" ", "")
-                    if any(k in clean for k in ("bag", "item", "backpack")) or "🎒" in label:
-                        bag_btn = btn
+                    if is_pokeball_menu_button(label) and not any(k in label.lower() for k in ("bag", "backpack")):
+                        pokeballs_menu_btn = btn
                         break
-                if bag_btn:
-                    chosen_button = bag_btn
-                    chosen_ball_name = "Bag (for Repeat Ball)"
-                    logger.info("[%s] 🔁 [☆ Star Detected] Wild %s has '☆' -> Opening Bag to access Repeat Ball!",
-                                account_name, poke_name)
+                if not pokeballs_menu_btn:
+                    for label, btn in button_map.items():
+                        if any(k in label.lower() for k in ("bag", "backpack")) or "🎒" in label:
+                            pokeballs_menu_btn = btn
+                            break
+                if not pokeballs_menu_btn:
+                    for label, btn in button_map.items():
+                        if "item" in label.lower():
+                            pokeballs_menu_btn = btn
+                            break
+
+                if pokeballs_menu_btn:
+                    chosen_button = pokeballs_menu_btn
+                    chosen_ball_name = f"{pokeballs_menu_btn.text} (for Repeat Ball)"
+                    logger.info("[%s] 🔁 [☆ Star Detected] Wild %s has '☆' -> Opening %s to access Repeat Ball!",
+                                account_name, poke_name, pokeballs_menu_btn.text)
                 else:
                     logger.warning("[%s] 🔁 [☆ Star Detected] Wild %s has '☆' but Repeat Ball button is not available! Falling back to preferred balls.",
                                    account_name, poke_name)
