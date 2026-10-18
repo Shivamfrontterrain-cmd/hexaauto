@@ -44,48 +44,81 @@ POKEBALL_TYPE_PREFIXES = (
     "wing", "jet", "leaden", "gigaton", "regular"
 )
 
+NON_BALL_BUTTON_KEYWORDS = (
+    "run", "bag", "switch", "pokemon", "pokemons", "back", "cancel",
+    "battle", "battles", "fight", "attack", "continue", "next", "proceed",
+    "ev yield", "yield", "pokedex", "dex", "info", "guide", "stat", "stats"
+)
+
 def is_pokeball_button(label: str, pokedex: Optional["PokedexService"] = None) -> bool:
     """
     Accurately determines whether a Telegram button represents a Pokéball.
     Explicitly filters out attack moves like 'Electro Ball', 'Gyro Ball', and 'Shadow Ball'.
+    Recognizes formats with or without 'ball': e.g. 'Repeat Ball', 'Repeatball',
+    'Repeat (x10)', 'Repeat x5', 'Repeat', '🔁 Repeat', 'Ultra (x5)', etc.
     """
     if not label:
         return False
 
     clean = re.sub(r"[\(\[\{].*?[\)\]\}]", "", label)
-    clean = re.sub(r"\bx\d+\b", "", clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r"\bx\d+\b", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\b\d+\b", "", clean).strip()
     clean_lower = clean.lower()
 
-    # 1. Moves with "ball" in the name are NEVER Pokéballs
+    # 1. Non-ball utility and action buttons are NEVER Pokéballs
+    if any(k in clean_lower for k in NON_BALL_BUTTON_KEYWORDS):
+        return False
+
+    # 2. Moves with "ball" in the name are NEVER Pokéballs
     if any(m in clean_lower for m in KNOWN_BALL_MOVES):
         return False
 
-    # 2. Check against pokedex move database if available
+    # 3. Check against pokedex move database if available
     if pokedex:
         cleaned_for_pokedex = pokedex.clean_name(label)
         if pokedex.get_move(cleaned_for_pokedex):
             return False
+        cleaned_stripped = pokedex.clean_name(clean_lower)
+        if pokedex.get_move(cleaned_stripped):
+            return False
 
-    # 3. Exact matches for standard Pokéballs
+    # 4. Exact matches for standard Pokéballs
     if clean_lower in ("regular", "regularball", "regular ball", "pokeball", "poke ball", "poké ball", "pokéball"):
         return True
 
-    # 4. Ball with valid Pokéball type prefix (e.g. Ultra Ball, Repeat Ball, Great Ball, etc.)
+    # 5. Ball with valid Pokéball type prefix (e.g. Ultra Ball, Repeat Ball, Great Ball, etc.)
     if ("ball" in clean_lower or "balls" in clean_lower) and any(p in clean_lower for p in POKEBALL_TYPE_PREFIXES):
         return True
+
+    # 6. Button text matching a Pokéball prefix even without the word 'ball' (e.g. 'Repeat', 'Repeat (x12)', 'Ultra', 'Great', 'Master')
+    clean_alpha = re.sub(r"[^a-z0-9]", "", clean_lower)
+    if clean_alpha in POKEBALL_TYPE_PREFIXES:
+        return True
+    for p in POKEBALL_TYPE_PREFIXES:
+        if clean_alpha.startswith(p) and (len(clean_alpha) == len(p) or clean_alpha.endswith("ball") or clean_alpha.endswith("balls")):
+            return True
 
     return False
 
 STAR_CUSTOM_EMOJI_IDS = {5258185631355378853, "5258185631355378853"}
+
+STAR_SYMBOLS = (
+    "☆", "★", "⭐", "⭐️", "🌟", "✨", "💫",
+    "✪", "✫", "✬", "✭", "✮", "✯", "✰",
+    "✦", "✧", "✶", "✷", "✸", "✹", "✺",
+    "⚝", "⭒", "⭑", "✴️", "✳️",
+    "[☆", "[★", ":star:", ":star2:"
+)
 
 def check_has_star(message: Optional[any] = None, text: Optional[str] = None) -> bool:
     """
     Accurately determines whether a wild Pokémon encounter or battle has a star '☆'
     (indicating the Pokémon was previously caught/owned, requiring Repeat Ball catch).
     Detects:
-    1. Unicode star symbols ('☆', '★', '⭐', '🌟', '✨', '[☆') in text/raw_text/labels.
-    2. Telegram Custom Emoji entities matching the star emoji id:
-       5258185631355378853 (or configured in config.STAR_CUSTOM_EMOJI_IDS).
+    1. Unicode star symbols ('☆', '★', '⭐', '⭐️', '🌟', '✨', '💫', etc.) in text/raw_text/labels/buttons.
+    2. Telegram Custom Emoji entities:
+       - Configured IDs in config.STAR_CUSTOM_EMOJI_IDS (e.g. 5258185631355378853).
+       - Any Custom Emoji attached to a wild encounter or battle line.
     """
     target_texts = []
     if text:
@@ -97,10 +130,24 @@ def check_has_star(message: Optional[any] = None, text: Optional[str] = None) ->
         msg_text = getattr(message, "text", None)
         if msg_text and msg_text != raw_text:
             target_texts.append(str(msg_text))
+        orig_msg = getattr(message, "message", None)
+        if orig_msg and orig_msg not in target_texts:
+            target_texts.append(str(orig_msg))
+        caption = getattr(message, "caption", None)
+        if caption and caption not in target_texts:
+            target_texts.append(str(caption))
 
-    star_symbols = ("☆", "★", "⭐", "🌟", "✨", "[☆")
+        # Check buttons attached to message
+        buttons = getattr(message, "buttons", None)
+        if buttons:
+            for row in buttons:
+                for btn in row:
+                    btn_text = getattr(btn, "text", None)
+                    if btn_text:
+                        target_texts.append(str(btn_text))
+
     for t in target_texts:
-        if any(s in t for s in star_symbols):
+        if any(s in t for s in STAR_SYMBOLS):
             return True
 
     # Check Telegram Custom Emoji entities
@@ -119,10 +166,29 @@ def check_has_star(message: Optional[any] = None, text: Optional[str] = None) ->
         except Exception:
             pass
 
+        full_content = " ".join(target_texts).lower()
+        is_wild_context = any(w in full_content for w in ("wild", "appeared", "battle", "catch", "encounter", "level", "lv"))
+
         for ent in message.entities:
             doc_id = getattr(ent, "document_id", None)
             if doc_id is not None:
+                # 1. Matches configured or known star custom emoji document IDs
                 if doc_id in star_ids or str(doc_id) in star_ids:
+                    return True
+
+                # 2. Check the text covered by this custom emoji entity
+                offset = getattr(ent, "offset", None)
+                length = getattr(ent, "length", None)
+                orig_message_str = getattr(message, "message", "") or getattr(message, "raw_text", "") or ""
+                if offset is not None and length is not None and orig_message_str:
+                    sub = orig_message_str[offset:offset+length]
+                    if any(s in sub for s in STAR_SYMBOLS):
+                        return True
+
+                # 3. Any custom emoji entity present in a wild Pokémon spawn / encounter message is the star!
+                # Hexa bot only adds a custom emoji to 'A wild ... has appeared!' when the Pokémon was already caught.
+                if is_wild_context:
+                    logger.info("Detected custom emoji star entity in wild encounter (document_id: %s)", doc_id)
                     return True
 
     return False

@@ -1125,6 +1125,138 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         await manager.resolve_stuck_battle(mock_client, "acc1", 12345)
         battle_h.handle_battle_turn.assert_called_once_with(mock_client, "acc1", active_turn_msg)
 
+    async def test_tangrowth_wild_star_encounter_uses_repeat_ball(self):
+        """
+        Exact user case:
+        'A wild Tangrowth (Lv. 48) has appeared! ☆'
+        Ensures star emoji at the end of the spawn message is detected and Repeat Ball is clicked.
+        """
+        import config
+        from core.pokedex import check_has_star, is_pokeball_button
+        from handlers.spawn_handler import SpawnHandler
+
+        msg = MagicMock()
+        msg.id = 888
+        msg.chat_id = 123
+        msg.raw_text = "A wild Tangrowth (Lv. 48) has appeared! ☆"
+
+        # 1. Star check
+        self.assertTrue(check_has_star(msg), "Star emoji '☆' at end of Tangrowth spawn was not detected!")
+
+        # 2. Button recognition
+        self.assertTrue(is_pokeball_button("Repeat (x15)"), "'Repeat (x15)' was not recognized as a Pokéball!")
+        self.assertTrue(is_pokeball_button("Repeat"), "'Repeat' was not recognized as a Pokéball!")
+        self.assertTrue(is_pokeball_button("Repeat Ball"), "'Repeat Ball' was not recognized as a Pokéball!")
+
+        # 3. SpawnHandler throws Repeat Ball
+        spawn_handler = SpawnHandler()
+        btn_ultra = MagicMock(text="Ultraball (x5)", click=AsyncMock())
+        btn_repeat = MagicMock(text="Repeat (x15)", click=AsyncMock())
+        btn_poke = MagicMock(text="Pokeball (x20)", click=AsyncMock())
+        msg.buttons = [[btn_ultra], [btn_repeat, btn_poke]]
+
+        mock_client = AsyncMock()
+        success = await spawn_handler.handle_spawn(mock_client, "acc1", msg)
+        self.assertTrue(success)
+        btn_repeat.click.assert_called_once()
+        btn_ultra.click.assert_not_called()
+        btn_poke.click.assert_not_called()
+
+    async def test_tangrowth_star_encounter_in_battle_prioritizes_bag_when_balls_present(self):
+        """
+        Verifies that in battle vs a starred Pokémon (Tangrowth ☆), if Poke Ball is on screen
+        but Repeat Ball is in Bag, BattleHandler opens Bag instead of prematurely throwing Poke Ball.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        # Pre-mark encounter as starred from spawn
+        battle_handler.starred_encounters["acc1"] = True
+
+        msg = MagicMock()
+        msg.id = 991
+        msg.raw_text = "Battle began!\nWild Tangrowth [Grass]\nHP: 140/140"
+        btn_poke = MagicMock(text="Poke Ball (x10)", click=AsyncMock())
+        btn_bag = MagicMock(text="🎒 Bag", click=AsyncMock())
+        btn_run = MagicMock(text="Run", click=AsyncMock())
+        msg.buttons = [[btn_poke], [btn_bag, btn_run]]
+
+        mock_client = AsyncMock()
+        await battle_handler.handle_battle_turn(mock_client, "acc1", msg)
+
+        # Must click Bag to find Repeat Ball! Must NOT throw Poke Ball!
+        btn_bag.click.assert_called_once()
+        btn_poke.click.assert_not_called()
+
+    async def test_star_encounter_persists_after_pokemon_breaks_free(self):
+        """
+        Verifies that when a starred Pokémon breaks free, the encounter retains its star status
+        and re-attempts catch using Repeat Ball on the next turn.
+        """
+        from handlers.spawn_handler import SpawnHandler
+
+        spawn_handler = SpawnHandler()
+
+        # Step 1: Initial spawn with '☆'
+        msg1 = MagicMock()
+        msg1.id = 501
+        msg1.chat_id = 999
+        msg1.raw_text = "A wild Tangrowth (Lv. 48) has appeared! ☆"
+        btn_repeat1 = MagicMock(text="Repeat Ball (x8)", click=AsyncMock())
+        msg1.buttons = [[btn_repeat1]]
+
+        mock_client = AsyncMock()
+        await spawn_handler.handle_spawn(mock_client, "acc1", msg1)
+        self.assertTrue(spawn_handler.starred_encounters.get("acc1", False))
+
+        # Step 2: Pokémon breaks free (text no longer mentions star)
+        break_free_msg = MagicMock()
+        break_free_msg.id = 501
+        break_free_msg.chat_id = 999
+        break_free_msg.raw_text = "Wild Tangrowth broke free! What will you do?"
+        btn_repeat2 = MagicMock(text="Repeat Ball (x7)", click=AsyncMock())
+        btn_ultra2 = MagicMock(text="Ultra Ball (x10)", click=AsyncMock())
+        break_free_msg.buttons = [[btn_ultra2], [btn_repeat2]]
+
+        # Re-attempt spawn
+        await spawn_handler.handle_spawn(mock_client, "acc1", break_free_msg)
+
+        # Star must persist and Repeat Ball must be clicked again!
+        self.assertTrue(spawn_handler.starred_encounters.get("acc1", False))
+        btn_repeat2.click.assert_called_once()
+        btn_ultra2.click.assert_not_called()
+
+    def test_various_star_unicode_symbols_detected(self):
+        """
+        Tests that check_has_star detects all common Unicode star and emoji symbols.
+        """
+        from core.pokedex import check_has_star
+
+        stars = ["☆", "★", "⭐", "⭐️", "🌟", "✨", "💫", "✪", "✫", "✬", "✭", "✮", "✯", "✰"]
+        for s in stars:
+            msg = MagicMock()
+            msg.raw_text = f"A wild Tangrowth (Lv. 48) has appeared! {s}"
+            msg.entities = []
+            self.assertTrue(check_has_star(msg), f"Star symbol '{s}' was not detected!")
+
+    def test_custom_emoji_with_unknown_doc_id_in_wild_spawn_detected_as_star(self):
+        """
+        Tests that any custom emoji entity in a wild spawn message is recognized as the star.
+        """
+        from core.pokedex import check_has_star
+
+        ent = MagicMock()
+        ent.document_id = 999888777666  # Arbitrary new emoji ID from bot pack
+        msg = MagicMock()
+        msg.raw_text = "A wild Tangrowth (Lv. 48) has appeared!"
+        msg.entities = [ent]
+
+        self.assertTrue(check_has_star(msg), "Custom emoji in wild spawn was not recognized as star!")
+
 if __name__ == "__main__":
     unittest.main()
 

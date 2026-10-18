@@ -108,9 +108,11 @@ class SpawnHandler:
         buttons = message.buttons or []
         if buttons:
             button_texts = [btn.text.strip().lower() for row in buttons for btn in row]
+            # If buttons contain actual battle attack moves (Scratch, Tackle, etc.)
+            if self.battle_handler and any(self.battle_handler.pokedex.get_move(self.battle_handler.pokedex.clean_name(b)) for b in button_texts):
+                return False
             battle_btn_keywords = (
-                "run", "pokemons", "pokemon", "switch", "bag", "items",
-                "fight", "attack", "moves", "continue", "next"
+                "switch", "fight", "attack", "moves", "continue"
             )
             if any(any(k in b for k in battle_btn_keywords) for b in button_texts):
                 return False
@@ -290,10 +292,14 @@ class SpawnHandler:
 
         logger.debug("[%s] Available spawn buttons: %s", account_name, list(button_map.keys()))
 
-        # Check for star symbol '☆' indicating Pokémon was already caught / owned (unicode or custom emoji 5258185631355378853)
+        # Check for star symbol '☆' indicating Pokémon was already caught / owned (unicode or custom emoji)
         has_star = check_has_star(message, raw_text)
         if not has_star:
             has_star = any(check_has_star(text=label) for label in button_map.keys())
+
+        # If already tracked as starred for this active encounter (e.g. from previous edit/turn or break free), retain it!
+        if self.starred_encounters.get(account_name, False):
+            has_star = True
 
         # Track star encounter in shared dict so BattleHandler knows this encounter has '☆'
         if has_star:
@@ -344,7 +350,7 @@ class SpawnHandler:
         if has_star:
             repeat_btn = None
             for label, btn in button_map.items():
-                clean = label.replace(" ", "")
+                clean = label.replace(" ", "").replace("-", "")
                 if "repeat" in clean:
                     repeat_btn = btn
                     break
@@ -355,8 +361,21 @@ class SpawnHandler:
                 logger.info("[%s] 🔁 [☆ Star Detected] Wild encounter has '☆' -> Prioritizing Repeat Ball for %s!",
                             account_name, poke_name)
             else:
-                logger.warning("[%s] 🔁 [☆ Star Detected] Wild %s has '☆' but Repeat Ball button is not available! Falling back to preferred balls.",
-                               account_name, poke_name)
+                # Check if Bag / Items button is present to access Repeat Ball
+                bag_btn = None
+                for label, btn in button_map.items():
+                    clean = label.replace(" ", "")
+                    if any(k in clean for k in ("bag", "item", "backpack")) or "🎒" in label:
+                        bag_btn = btn
+                        break
+                if bag_btn:
+                    chosen_button = bag_btn
+                    chosen_ball_name = "Bag (for Repeat Ball)"
+                    logger.info("[%s] 🔁 [☆ Star Detected] Wild %s has '☆' -> Opening Bag to access Repeat Ball!",
+                                account_name, poke_name)
+                else:
+                    logger.warning("[%s] 🔁 [☆ Star Detected] Wild %s has '☆' but Repeat Ball button is not available! Falling back to preferred balls.",
+                                   account_name, poke_name)
 
         # If not chosen yet (no star, or Repeat Ball was unavailable), check PREFERRED_BALLS
         if not chosen_button:

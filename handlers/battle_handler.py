@@ -193,12 +193,12 @@ class BattleHandler:
             "my_max_hp": 1,
         }
 
-        # Check for star symbol '☆', unicode variants, or Telegram Custom Emoji (5258185631355378853)
+        # Check for star symbol '☆', unicode variants, or Telegram Custom Emoji
         if check_has_star(msg, text):
             state["has_star"] = True
 
-        # Extract wild Pokémon: "Wild Metapod [Bug]" or "Wild Metapod ☆ [Bug]"
-        wild_match = re.search(r"wild\s+([A-Za-z0-9\-]+)(?:\s*[☆★⭐🌟✨])?\s*(?:\[(.*?)\])?", text, re.IGNORECASE)
+        # Extract wild Pokémon: "Wild Metapod [Bug]", "Wild Metapod ☆ [Bug]", or "Wild Tangrowth (Lv. 48) has appeared! ☆"
+        wild_match = re.search(r"wild\s+([A-Za-z0-9\-]+)(?:\s*\([^\)]+\))?(?:\s*\[(.*?)\])?", text, re.IGNORECASE)
         if wild_match:
             state["wild_name"] = wild_match.group(1).title()
             if wild_match.group(2):
@@ -384,21 +384,44 @@ class BattleHandler:
             # Rule 1: '☆' detected -> Pokémon was already caught once -> USE REPEAT BALL!
             if state["has_star"]:
                 repeat_btn = None
+                # Check in balls first
                 for label, btn in balls.items():
                     if "repeat" in label.lower():
                         repeat_btn = btn
                         break
 
+                # If not in balls, check all buttons on the message directly
+                if not repeat_btn and message.buttons:
+                    for row in message.buttons:
+                        for btn in row:
+                            if "repeat" in btn.text.lower():
+                                repeat_btn = btn
+                                break
+                        if repeat_btn:
+                            break
+
                 if repeat_btn:
                     chosen_button = repeat_btn
                     action_desc = f"[HUNT: CATCH] 🔁 Pokémon has '☆' -> Throwing Repeat Ball at {state['wild_name']}"
-                elif balls:
-                    chosen_button = list(balls.values())[0]
-                    action_desc = f"[HUNT: CATCH] 🔁 Has '☆' but Repeat Ball missing -> Throwing {chosen_button.text}"
                 elif bag_btn and self.bag_opened.get(account_name) != message.id:
+                    # Repeat Ball is not on screen, but Bag is available -> OPEN BAG!
                     self.bag_opened[account_name] = message.id
                     chosen_button = bag_btn
                     action_desc = f"[HUNT: CATCH] 🔁 [☆ Star Detected] Opening Bag to access Repeat Ball for {state['wild_name']}"
+                elif balls:
+                    # Repeat Ball is truly missing (e.g. out of stock in Bag) -> throw fallback ball
+                    fallback_ball_btn = None
+                    for pref in config.PREFERRED_BALLS:
+                        pref_clean = pref.lower().replace(" ", "").replace("ball", "")
+                        for label, btn in balls.items():
+                            clean_l = label.lower().replace(" ", "").replace("ball", "")
+                            if pref_clean in clean_l:
+                                fallback_ball_btn = btn
+                                break
+                        if fallback_ball_btn:
+                            break
+                    chosen_button = fallback_ball_btn or list(balls.values())[0]
+                    action_desc = f"[HUNT: CATCH] 🔁 Has '☆' but Repeat Ball missing -> Throwing {chosen_button.text}"
                 elif actions:
                     chosen_button = list(actions.values())[0]
                     action_desc = f"[HUNT: CATCH] Advancing turn with '{chosen_button.text}'"
