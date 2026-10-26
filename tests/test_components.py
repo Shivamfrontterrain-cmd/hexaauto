@@ -1376,6 +1376,184 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         btn_poke.click.assert_not_called()
         btn_back.click.assert_not_called()
 
+    async def test_auto_switch_on_fainted_active_pokemon(self):
+        """
+        Tests the exact scenario where the wild Pokémon defeats player's active Pokémon
+        and Hexa bot prompts 'Choose a Pokémon to switch to:'.
+        Auto-switch must:
+        1. NOT treat this as a battle end / victory
+        2. Recognize it as an active battle switch turn
+        3. Parse the alive party members and pick the best matchup
+        4. Click the alive button (e.g. Primarina with 4.0x Water vs Arcanine-hisui Fire/Rock)
+        5. NEVER click the empty/fainted button or Back/View Team
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        switch_msg = MagicMock()
+        switch_msg.id = 5555
+        switch_msg.chat_id = 999
+        switch_msg.raw_text = (
+            "Aww! Wild Arcanine-hisui broke free!\n\n"
+            "Wild Arcanine-hisui used Flare Blitz\n"
+            "It dealt 4 damage!\n"
+            "It's super effective!\n"
+            "Metagross fainted!\n\n"
+            "Choose a Pokémon to switch to:\n\n"
+            "1. Metagross (Fainted)\n"
+            "2. Delphox\n"
+            "3. Primarina\n"
+            "4. Gengar\n"
+            "5. Iron Valiant\n"
+            "6. Corviknight"
+        )
+
+        btn_empty = MagicMock(text=" ", click=AsyncMock())
+        btn_delphox = MagicMock(text="2", click=AsyncMock())
+        btn_primarina = MagicMock(text="3", click=AsyncMock())
+        btn_gengar = MagicMock(text="4", click=AsyncMock())
+        btn_iron_valiant = MagicMock(text="5", click=AsyncMock())
+        btn_corviknight = MagicMock(text="6", click=AsyncMock())
+        btn_view_team = MagicMock(text="View Team", click=AsyncMock())
+        btn_back = MagicMock(text="Back", click=AsyncMock())
+
+        switch_msg.buttons = [
+            [btn_empty, btn_delphox],
+            [btn_primarina, btn_gengar],
+            [btn_iron_valiant, btn_corviknight],
+            [btn_view_team, btn_back]
+        ]
+
+        # 1. Verification of classification methods
+        self.assertTrue(battle_handler.is_switch_prompt(switch_msg))
+        self.assertFalse(battle_handler.is_battle_end(switch_msg))
+        self.assertTrue(battle_handler.is_battle_message(switch_msg, "test_account"))
+
+        # 2. Execution of turn
+        mock_client = AsyncMock()
+        success = await battle_handler.handle_battle_turn(mock_client, "test_account", switch_msg)
+        self.assertTrue(success)
+
+        # Primarina has 4.0x type effectiveness against Wild Arcanine-hisui (Fire/Rock)!
+        btn_primarina.click.assert_called_once()
+        btn_delphox.click.assert_not_called()
+        btn_empty.click.assert_not_called()
+        btn_view_team.click.assert_not_called()
+        btn_back.click.assert_not_called()
+
+    async def test_auto_switch_fallback_party_order(self):
+        """
+        When type effectiveness is equal or wild Pokémon is unknown,
+        auto-switch chooses the first available alive Pokémon in party order (slot 2).
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        switch_msg = MagicMock()
+        switch_msg.id = 5556
+        switch_msg.chat_id = 999
+        switch_msg.raw_text = (
+            "Metagross fainted!\n\n"
+            "Choose a Pokémon to switch to:\n\n"
+            "1. Metagross (Fainted)\n"
+            "2. Delphox\n"
+            "3. Primarina\n"
+            "4. Gengar"
+        )
+
+        btn_empty = MagicMock(text="", click=AsyncMock())
+        btn_delphox = MagicMock(text="2", click=AsyncMock())
+        btn_primarina = MagicMock(text="3", click=AsyncMock())
+        btn_gengar = MagicMock(text="4", click=AsyncMock())
+        btn_back = MagicMock(text="Back", click=AsyncMock())
+
+        switch_msg.buttons = [
+            [btn_empty, btn_delphox],
+            [btn_primarina, btn_gengar],
+            [btn_back]
+        ]
+
+        mock_client = AsyncMock()
+        success = await battle_handler.handle_battle_turn(mock_client, "test_account", switch_msg)
+        self.assertTrue(success)
+
+        # Slot 2 (Delphox) must be picked as the first alive party member
+        btn_delphox.click.assert_called_once()
+        btn_primarina.click.assert_not_called()
+        btn_empty.click.assert_not_called()
+        btn_back.click.assert_not_called()
+
+    async def test_auto_switch_disabled_setting(self):
+        """
+        When auto_switch is set to False, handle_battle_turn must NOT click switch buttons.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex, auto_switch=False)
+
+        switch_msg = MagicMock()
+        switch_msg.id = 5557
+        switch_msg.chat_id = 999
+        switch_msg.raw_text = (
+            "Metagross fainted!\n"
+            "Choose a Pokémon to switch to:\n"
+            "1. Metagross (Fainted)\n"
+            "2. Delphox"
+        )
+        btn_delphox = MagicMock(text="2", click=AsyncMock())
+        switch_msg.buttons = [[btn_delphox]]
+
+        mock_client = AsyncMock()
+        success = await battle_handler.handle_battle_turn(mock_client, "test_account", switch_msg)
+        self.assertFalse(success)
+        btn_delphox.click.assert_not_called()
+
+    async def test_auto_switch_with_named_buttons(self):
+        """
+        Tests switch when buttons display Pokémon names instead of numbers.
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex)
+
+        switch_msg = MagicMock()
+        switch_msg.id = 5558
+        switch_msg.chat_id = 999
+        switch_msg.raw_text = (
+            "Wild Geodude attacked!\n"
+            "Pikachu fainted!\n\n"
+            "Choose a Pokémon to switch to:\n\n"
+            "1. Pikachu (Fainted)\n"
+            "2. Squirtle\n"
+            "3. Pidgey"
+        )
+
+        btn_squirtle = MagicMock(text="Squirtle", click=AsyncMock())
+        btn_pidgey = MagicMock(text="Pidgey", click=AsyncMock())
+        switch_msg.buttons = [[btn_squirtle, btn_pidgey]]
+
+        mock_client = AsyncMock()
+        success = await battle_handler.handle_battle_turn(mock_client, "test_account", switch_msg)
+        self.assertTrue(success)
+
+        # Squirtle (Water vs Rock/Ground) has 4.0x advantage!
+        btn_squirtle.click.assert_called_once()
+        btn_pidgey.click.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
 

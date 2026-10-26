@@ -46,6 +46,9 @@ FAST_BATTLE = os.getenv("FAST_BATTLE", "True").lower() in ("true", "1", "yes")
 FAST_BATTLE_MIN_DELAY = float(os.getenv("FAST_BATTLE_MIN_DELAY", "0.05"))
 FAST_BATTLE_MAX_DELAY = float(os.getenv("FAST_BATTLE_MAX_DELAY", "0.20"))
 
+# Auto-Switch settings (automatically switches to an alive Pokémon when active Pokémon faints)
+AUTO_SWITCH_ENABLED = os.getenv("AUTO_SWITCH_ENABLED", "True").lower() in ("true", "1", "yes")
+
 # Auto-Guess settings (/guess "Who's that Pokémon?" PD farming)
 AUTO_GUESS_ENABLED = os.getenv("AUTO_GUESS_ENABLED", "True").lower() in ("true", "1", "yes")
 GUESS_COMMAND = os.getenv("GUESS_COMMAND", "/guess")

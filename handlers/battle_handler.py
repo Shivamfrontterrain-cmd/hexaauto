@@ -40,12 +40,21 @@ BALL_BUTTON_NAMES = {
 class BattleHandler:
     """Handles Pokémon battles for HeXamonbot with Kill/PD farming and Hybrid modes."""
 
-    def __init__(self, pokedex: PokedexService, on_battle_end=None, spawn_handler=None, hunt_mode: Optional[str] = None):
+    def __init__(
+        self,
+        pokedex: PokedexService,
+        on_battle_end=None,
+        spawn_handler=None,
+        hunt_mode: Optional[str] = None,
+        auto_switch: Optional[bool] = None
+    ):
         self.pokedex = pokedex
         self.on_battle_end = on_battle_end
         self.spawn_handler = spawn_handler
         self.hunt_mode = hunt_mode
+        self.auto_switch = getattr(config, "AUTO_SWITCH_ENABLED", True) if auto_switch is None else auto_switch
         self.account_modes: Dict[str, str] = {}
+        self.account_auto_switch: Dict[str, bool] = {}
         self.active_battles: Dict[str, dict] = {}
         self.starred_encounters: Dict[str, bool] = {}
         self.bag_opened: Dict[str, int] = {}
@@ -79,10 +88,71 @@ class BattleHandler:
         hm = getattr(config, "HUNT_MODE", "kill").lower().strip()
         return "catch" if hm in ("hybrid", "catch") else "kill"
 
+    def set_auto_switch(self, enabled: bool, account_name: Optional[str] = None):
+        """Enables or disables auto-switch dynamically per account or instance."""
+        if account_name:
+            self.account_auto_switch[account_name] = enabled
+        else:
+            self.auto_switch = enabled
+
+    def get_auto_switch(self, account_name: Optional[str] = None) -> bool:
+        """Checks if auto-switch is enabled for the account or instance."""
+        if account_name and account_name in self.account_auto_switch:
+            return self.account_auto_switch[account_name]
+        return self.auto_switch
+
+    def is_switch_prompt(self, message: Message) -> bool:
+        """Determines if a battle message is prompting the player to switch Pokémon."""
+        if not message:
+            return False
+        text = (message.raw_text or "").lower()
+
+        # Direct prompt phrases (handles Pokémon / Pokemon)
+        switch_phrases = (
+            "choose a pokémon to switch to",
+            "choose a pokemon to switch to",
+            "choose a pokémon to switch",
+            "choose a pokemon to switch",
+            "choose a pokémon to send out",
+            "choose a pokemon to send out",
+            "select a pokémon to switch",
+            "select a pokemon to switch",
+            "which pokémon will you switch",
+            "which pokemon will you switch",
+            "switch to:",
+            "send out:"
+        )
+        if any(p in text for p in switch_phrases):
+            return True
+
+        # Check for faint followed by switch selection or party listing
+        if ("fainted" in text or "faint" in text) and any(w in text for w in ("switch", "send out", "choose")):
+            return True
+
+        # Button and list heuristic:
+        # Message lists party entries (e.g. "1. Metagross (Fainted)", "2. Delphox")
+        # and has inline buttons containing slot digits (1-6) or "view team"
+        buttons = message.buttons or []
+        if buttons:
+            btn_texts = [btn.text.strip().lower() for row in buttons for btn in row]
+            has_view_team = any("team" in b or "party" in b for b in btn_texts)
+            has_digits = any(b.isdigit() and 1 <= int(b) <= 6 for b in btn_texts)
+            if (has_view_team or has_digits) and (
+                "fainted" in text or "switch" in text or re.search(r"^\s*[1-6][\.\:\)]\s*\w+", text, re.MULTILINE)
+            ):
+                return True
+
+        return False
+
     def is_battle_end(self, message: Message) -> bool:
         """Checks if a battle concluded (enemy fainted or captured)."""
         if not message:
             return False
+
+        # CRITICAL: A switch prompt (e.g. player's Pokémon fainted) is an active battle turn, NOT an end!
+        if self.is_switch_prompt(message):
+            return False
+
         text = (message.raw_text or "").lower()
 
         # Faint / defeat / victory indicators
@@ -118,6 +188,10 @@ class BattleHandler:
         # If it's already concluded, it's an end message, not an active battle turn
         if self.is_battle_end(message):
             return False
+
+        # Switch prompt belongs directly to BattleHandler!
+        if self.is_switch_prompt(message):
+            return True
 
         text = (message.raw_text or "").lower()
 
@@ -313,8 +387,196 @@ class BattleHandler:
 
         asyncio.create_task(watchdog())
 
+    async def handle_auto_switch(self, client: TelegramClient, account_name: str, message: Message) -> bool:
+        """
+        Automatically selects and switches to an available (healthy/alive) Pokémon
+        when prompted during battle.
+        """
+        raw_text = message.raw_text or ""
+        buttons = message.buttons or []
+
+        if not buttons:
+            logger.warning("[%s] Auto-switch: No buttons present on switch message.", account_name)
+            return False
+
+        # 1. Parse party slots from text
+        # Format example:
+        # 1. Metagross (Fainted)
+        # 2. Delphox
+        # 3. Primarina
+        # 4. Gengar
+        # 5. Iron Valiant
+        # 6. Corviknight
+        party_members = []
+        for line in raw_text.splitlines():
+            line_str = line.strip()
+            match = re.match(r"^([1-6])[\.\:\)]\s*([^\(\[\n\r]+?)(?:\s*[\(\[](.*?)[\)\]])?\s*$", line_str)
+            if match:
+                slot = int(match.group(1))
+                raw_poke_name = match.group(2).strip()
+                clean_poke_name = self.pokedex.clean_name(raw_poke_name)
+                status = (match.group(3) or "").strip().lower()
+                is_fainted = any(f in status for f in ("faint", "fnt", "ko", "0 hp", "dead")) or bool(re.search(r"\b0\s*/", status))
+                is_active = any(a in status for a in ("active", "in battle", "currently"))
+                party_members.append({
+                    "slot": slot,
+                    "name": clean_poke_name or raw_poke_name,
+                    "status": status,
+                    "fainted": is_fainted,
+                    "active": is_active
+                })
+
+        # 2. Extract wild Pokémon info to optimize switch choice
+        wild_name = "Unknown"
+        wild_match = re.search(r"wild\s+([A-Za-z0-9\-]+)", raw_text, re.IGNORECASE)
+        if wild_match:
+            wild_name = wild_match.group(1).title()
+        elif account_name in self.active_battles:
+            wild_name = self.active_battles[account_name].get("wild_name", "Unknown")
+
+        wild_types = []
+        if wild_name and wild_name != "Unknown":
+            wild_data = self.pokedex.get_pokemon(wild_name)
+            if wild_data:
+                wild_types = wild_data.get("types", [])
+
+        # 3. Map buttons to slots and Pokémon
+        # Buttons in the switch screen can be numbers (e.g. "2", "3") or Pokémon names.
+        # Fainted slots may have empty string/space buttons like " ".
+        slot_buttons = {}
+        name_buttons = {}
+        all_candidate_buttons = []
+
+        for row in buttons:
+            for btn in row:
+                btn_text = btn.text.strip()
+                if not btn_text:
+                    continue  # Blank/disabled button for fainted Pokémon
+                btn_lower = btn_text.lower()
+                if any(k in btn_lower for k in ("view team", "view party", "back", "cancel", "run")):
+                    continue
+
+                if btn_text.isdigit() and 1 <= int(btn_text) <= 6:
+                    slot_buttons[int(btn_text)] = btn
+                    all_candidate_buttons.append((int(btn_text), btn_text, btn))
+                else:
+                    clean_b = self.pokedex.clean_name(btn_text).lower()
+                    name_buttons[clean_b] = btn
+                    all_candidate_buttons.append((None, btn_text, btn))
+
+        # 4. Identify alive candidate Pokémon
+        eligible = []
+        if party_members:
+            for member in party_members:
+                if member["fainted"] or member["active"]:
+                    continue
+
+                slot = member["slot"]
+                poke_name = member["name"]
+                clean_name = self.pokedex.clean_name(poke_name).lower()
+
+                # Find associated button
+                target_btn = slot_buttons.get(slot)
+                if not target_btn:
+                    target_btn = name_buttons.get(clean_name)
+                if not target_btn:
+                    for k, b in name_buttons.items():
+                        if clean_name in k or k in clean_name:
+                            target_btn = b
+                            break
+
+                if target_btn:
+                    # Calculate type effectiveness score against wild Pokémon
+                    score = 1.0
+                    if wild_types:
+                        poke_data = self.pokedex.get_pokemon(poke_name)
+                        if poke_data:
+                            types = poke_data.get("types", [])
+                            if types:
+                                score = max(
+                                    [self.pokedex.get_type_multiplier(t, wild_types) for t in types],
+                                    default=1.0
+                                )
+                    eligible.append({
+                        "slot": slot,
+                        "name": poke_name,
+                        "button": target_btn,
+                        "score": score
+                    })
+
+        # 5. Fallback if party members couldn't be parsed from text
+        if not eligible and all_candidate_buttons:
+            for slot_num, text_val, btn in all_candidate_buttons:
+                eligible.append({
+                    "slot": slot_num or 99,
+                    "name": text_val,
+                    "button": btn,
+                    "score": 1.0
+                })
+
+        if not eligible:
+            logger.warning("[%s] 💀 Auto-switch: No alive Pokémon or clickable switch buttons found!", account_name)
+            # If all are fainted, user has lost / whited out
+            # Dismiss with Back if available so battle doesn't hang
+            for row in buttons:
+                for btn in row:
+                    if btn.text.strip().lower() in ("back", "cancel"):
+                        try:
+                            await btn.click()
+                        except Exception:
+                            pass
+                        break
+            return False
+
+        # 6. Rank candidates: highest type effectiveness first; if tied, lowest slot (first in party)
+        eligible.sort(key=lambda x: (-x["score"], x["slot"]))
+        chosen = eligible[0]
+        chosen_btn = chosen["button"]
+
+        if getattr(config, "FAST_BATTLE", True):
+            delay = random.uniform(
+                getattr(config, "FAST_BATTLE_MIN_DELAY", 0.05),
+                getattr(config, "FAST_BATTLE_MAX_DELAY", 0.20)
+            )
+        else:
+            delay = random.uniform(1.0, 2.0)
+
+        logger.info(
+            "[%s] 🔄 [AUTO SWITCH] Switching to %s (Slot %s, Matchup Score: %.1fx) vs Wild %s in %.2fs...",
+            account_name, chosen["name"], chosen["slot"], chosen["score"], wild_name, delay
+        )
+
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        self.active_battles[account_name] = {
+            "msg_id": message.id,
+            "chat_id": message.chat_id,
+            "wild_name": wild_name,
+            "last_click": asyncio.get_event_loop().time()
+        }
+
+        try:
+            await asyncio.wait_for(chosen_btn.click(), timeout=3.0)
+            click_success = True
+        except asyncio.TimeoutError:
+            logger.debug("[%s] Auto-switch button click timed out (dispatched).", account_name)
+            click_success = True
+        except Exception as e:
+            logger.error("[%s] Failed to click auto-switch button: %s", account_name, e)
+            click_success = False
+
+        self._schedule_battle_watchdog(client, account_name, message.chat_id, message.id)
+        return click_success
+
     async def handle_battle_turn(self, client: TelegramClient, account_name: str, message: Message) -> bool:
         """Executes a battle decision based on Hunt Category ('kill' vs 'catch')."""
+        if self.is_switch_prompt(message):
+            if not self.get_auto_switch(account_name):
+                logger.info("[%s] ⏸️ Pokémon switch prompted, but auto-switch is disabled.", account_name)
+                return False
+            return await self.handle_auto_switch(client, account_name, message)
+
         raw_text = message.raw_text or ""
         state = self.parse_battle_state(message)
 
@@ -605,10 +867,16 @@ class BattleHandler:
             logger.info("[%s] 💰 BATTLE VICTORY! Earned %d PD! (Total Won: %d, Total PD: %d)",
                         account_name, pd_amount, self.stats["battles_won"], self.stats["pd_earned"])
 
+        elif any(w in text_lower for w in ("blacked out", "whited out", "lost the battle")):
+            logger.info("[%s] 💀 All Pokémon fainted. Blacked out / lost the battle.", account_name)
+
         elif "fainted" in text_lower or "defeated" in text_lower or "won" in text_lower or "victory" in text_lower:
-            self.stats["battles_won"] += 1
-            logger.info("[%s] 💥 Wild Pokémon fainted/defeated! Battle won (Total: %d).",
-                        account_name, self.stats["battles_won"])
+            if "wild" in text_lower or any(w in text_lower for w in ("won", "victory", "defeated")):
+                self.stats["battles_won"] += 1
+                logger.info("[%s] 💥 Wild Pokémon fainted/defeated! Battle won (Total: %d).",
+                            account_name, self.stats["battles_won"])
+            else:
+                logger.info("[%s] 💥 Battle concluded.", account_name)
 
         elif any(w in text_lower for w in ("fled", "ran away", "escaped", "flew away", "got away")):
             logger.info("[%s] 💨 Wild Pokémon fled from battle. Encounter concluded.", account_name)

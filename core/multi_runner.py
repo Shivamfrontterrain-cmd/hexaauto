@@ -82,6 +82,7 @@ class AccountInstance:
         self.session_string = account_data["session_string"]
         self.action_mode = account_data.get("action_mode", "guess")
         self.hunt_mode = account_data.get("hunt_mode", "catch")
+        self.auto_switch = bool(account_data.get("auto_switch", 1))
         self.target_bot = account_data.get("target_bot", "HeXamonbot")
         self.hunt_chat = account_data.get("hunt_chat", "HeXamonbot")
 
@@ -101,7 +102,8 @@ class AccountInstance:
         self.battle_handler = BattleHandler(
             pokedex=pokedex,
             on_battle_end=self._on_battle_end,
-            hunt_mode=self.hunt_mode
+            hunt_mode=self.hunt_mode,
+            auto_switch=self.auto_switch
         )
         self.spawn_handler = SpawnHandler(
             on_catch_end=self._on_catch_end,
@@ -109,6 +111,7 @@ class AccountInstance:
             hunt_mode=self.hunt_mode
         )
         self.battle_handler.set_hunt_mode(self.hunt_mode, self.account_name)
+        self.battle_handler.set_auto_switch(self.auto_switch, self.account_name)
         self.spawn_handler.set_hunt_mode(self.hunt_mode, self.account_name)
         self.auto_hunter.set_handlers(battle_handler=self.battle_handler, spawn_handler=self.spawn_handler)
 
@@ -126,6 +129,12 @@ class AccountInstance:
         )
 
         self._register_events()
+
+    def set_auto_switch(self, enabled: bool):
+        """Updates auto-switch setting on this live instance and its battle handler."""
+        self.auto_switch = enabled
+        if self.battle_handler:
+            self.battle_handler.set_auto_switch(enabled, self.account_name)
 
     def set_hunt_mode(self, mode: str):
         """Updates the hunt strategy on this live instance and its handlers."""

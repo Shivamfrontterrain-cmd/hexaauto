@@ -96,7 +96,9 @@ class SpawnHandler:
 
         text = (message.raw_text or "").lower()
 
-        # If it's a catch result or battle message, do not treat as a fresh spawn
+        # If it's a catch result, switch prompt, or battle message, do not treat as a fresh spawn
+        if self.battle_handler and self.battle_handler.is_switch_prompt(message):
+            return False
         if self.is_catch_result(message):
             return False
         if any(b in text for b in ("battle begins", "battle started", "current turn:", "turn:")):
@@ -127,8 +129,8 @@ class SpawnHandler:
         """Checks if the message reports a catch result (success or failure)."""
         if not message:
             return False
-        # Active battle messages with controls/buttons are battle turns, not catch results!
-        if self.battle_handler and self.battle_handler.is_battle_message(message):
+        # Active battle messages and switch prompts are battle turns, not catch results!
+        if self.battle_handler and (self.battle_handler.is_battle_message(message) or self.battle_handler.is_switch_prompt(message)):
             return False
         text = (message.raw_text or "").lower()
         return any(phrase in text for phrase in CATCH_RESULT_PHRASES)

@@ -448,6 +448,7 @@ async def handle_callback_queries(event, custom_data: Optional[bytes] = None):
             "<b>Configuration:</b>\n"
             f"• Action Mode: <b>{acc.get('action_mode', 'guess').upper()}</b>\n"
             f"• Hunt Strategy: <b>{acc.get('hunt_mode', 'catch').upper()}</b>\n"
+            f"• Auto Switch: <b>{'ON' if acc.get('auto_switch', 1) else 'OFF'}</b>\n"
             f"• Target Bot: @{acc.get('target_bot', 'HeXamonbot')}\n\n"
             "<b>Performance Statistics:</b>\n"
             f"• Catches: <b>{stats.get('catches', 0):,}</b>\n"
@@ -469,6 +470,7 @@ async def handle_callback_queries(event, custom_data: Optional[bytes] = None):
                 Button.inline(f"Strategy: {acc.get('hunt_mode', 'catch').upper()}", f"toggle_hunt_{acc_id}".encode())
             ],
             [
+                Button.inline(f"Auto Switch: {'ON' if acc.get('auto_switch', 1) else 'OFF'}", f"toggle_switch_{acc_id}".encode()),
                 Button.inline(f"Target Bot: @{acc.get('target_bot', 'HeXamonbot')}", f"target_menu_{acc_id}".encode())
             ],
             [
@@ -555,6 +557,25 @@ async def handle_callback_queries(event, custom_data: Optional[bytes] = None):
             multi_runner.instances[acc_id].set_hunt_mode(next_mode)
 
         await event.answer(f"Hunt strategy updated to: {next_mode.upper()}")
+        await handle_callback_queries(event, custom_data=f"acc_view_{acc_id}".encode())
+        return
+
+    if data.startswith("toggle_switch_"):
+        acc_id = int(data.split("_")[-1])
+        acc = await db.get_account(acc_id)
+        if not acc or acc["owner_id"] != user_id:
+            await event.answer("Unauthorized.", alert=True)
+            return
+
+        current = acc.get("auto_switch", 1)
+        next_val = 0 if current else 1
+        await db.update_account_settings(acc_id, auto_switch=next_val)
+
+        if acc_id in multi_runner.instances:
+            multi_runner.instances[acc_id].set_auto_switch(bool(next_val))
+
+        state_str = "ENABLED" if next_val else "DISABLED"
+        await event.answer(f"Auto Switch is now: {state_str}")
         await handle_callback_queries(event, custom_data=f"acc_view_{acc_id}".encode())
         return
 

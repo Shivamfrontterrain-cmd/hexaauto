@@ -55,6 +55,7 @@ class Database:
                     hunt_chat TEXT DEFAULT 'HeXamonbot',
                     auto_catch INTEGER DEFAULT 1,
                     fast_battle INTEGER DEFAULT 1,
+                    auto_switch INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (owner_id) REFERENCES users(telegram_id) ON DELETE CASCADE
                 );
@@ -73,6 +74,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id);
                 CREATE INDEX IF NOT EXISTS idx_accounts_active ON accounts(is_active);
             """)
+            try:
+                conn.execute("ALTER TABLE accounts ADD COLUMN auto_switch INTEGER DEFAULT 1;")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
             logger.info("Database initialized successfully at %s", self.db_path)
 
@@ -183,7 +188,7 @@ class Database:
     def _update_account_settings_sync(self, account_id: int, **kwargs):
         allowed_fields = {
             "account_name", "action_mode", "hunt_mode", "hunt_interval",
-            "guess_interval", "target_bot", "hunt_chat", "auto_catch", "fast_battle"
+            "guess_interval", "target_bot", "hunt_chat", "auto_catch", "fast_battle", "auto_switch"
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if not updates:
