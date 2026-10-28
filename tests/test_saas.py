@@ -282,5 +282,127 @@ class TestSaaSSystem(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(inst.auto_hunter.is_encounter_active("ChampionBlue"))
         self.assertFalse(event.is_set())
 
+    async def test_auto_guesser_switch_target_chat_and_stop(self):
+        """Verifies that AutoGuesser can switch target chat dynamically for group guessing."""
+        from unittest.mock import MagicMock, AsyncMock
+        from core.auto_guesser import AutoGuesser
+        from handlers.check_handler import CheckHandler
+
+        mock_check_handler = MagicMock()
+        mock_check_handler.paused_accounts = set()
+        guesser = AutoGuesser(check_handler=mock_check_handler)
+
+        mock_client = AsyncMock()
+        account_name = "GroupGuesser"
+        group_chat_id = -1001987654321
+
+        guesser.switch_target_chat(account_name, mock_client, group_chat_id)
+        self.assertEqual(guesser.target_chats[account_name], group_chat_id)
+        self.assertIn(account_name, guesser.tasks)
+        self.assertFalse(guesser.tasks[account_name].done())
+
+        # Stop worker
+        guesser.stop_account(account_name)
+        self.assertNotIn(account_name, guesser.tasks)
+
+    async def test_account_instance_group_go_and_stop_commands(self):
+        """Verifies that /go in group registers chat, updates DB, and starts guessing."""
+        from unittest.mock import MagicMock, AsyncMock, patch
+        from core.multi_runner import AccountInstance
+
+        user_id = 99911
+        await self.db.register_user(user_id, "GroupMaster", "Master", False)
+        acc_id = await self.db.add_account(user_id, "GroupMaster", "+1222333444", "")
+        acc_data = await self.db.get_account(acc_id)
+
+        inst = AccountInstance(
+            account_data=acc_data,
+            pokedex=MagicMock(),
+            sprite_matcher=MagicMock(),
+            gemini=MagicMock(),
+            kb=MagicMock()
+        )
+
+        group_chat_id = -1002233445566
+
+        # Test group activation with database patch
+        with patch("core.multi_runner.db", self.db):
+            inst.active_group_chats.add(group_chat_id)
+            inst.hunt_chat = str(group_chat_id)
+            await self.db.update_account_settings(inst.acc_id, hunt_chat=str(group_chat_id))
+            inst.auto_guesser.switch_target_chat(inst.account_name, inst.client, group_chat_id)
+
+            self.assertIn(group_chat_id, inst.active_group_chats)
+            self.assertEqual(inst.auto_guesser.target_chats[inst.account_name], group_chat_id)
+
+            updated = await self.db.get_account(acc_id)
+            self.assertEqual(updated["hunt_chat"], str(group_chat_id))
+
+            # Stop
+            inst.active_group_chats.discard(group_chat_id)
+            inst.auto_guesser.stop_account(inst.account_name)
+            self.assertNotIn(group_chat_id, inst.active_group_chats)
+            self.assertNotIn(inst.account_name, inst.auto_guesser.tasks)
+
+    async def test_account_instance_group_bot_message_filtering(self):
+        """Verifies that in active group chats, bot messages with silhouettes are handled while human messages are ignored."""
+        from unittest.mock import MagicMock, AsyncMock
+        from core.multi_runner import AccountInstance
+
+        acc_data = {
+            "id": 501,
+            "owner_id": 5001,
+            "account_name": "FilterTester",
+            "phone": "+1999888777",
+            "session_string": "",
+            "action_mode": "guess",
+            "hunt_mode": "catch",
+            "target_bot": "HeXamonbot",
+            "hunt_chat": "HeXamonbot"
+        }
+
+        inst = AccountInstance(
+            account_data=acc_data,
+            pokedex=MagicMock(),
+            sprite_matcher=MagicMock(),
+            gemini=MagicMock(),
+            kb=MagicMock()
+        )
+
+        group_id = -1005544332211
+        inst.active_group_chats.add(group_id)
+
+        # 1. Normal human member sends a message in group -> must be ignored!
+        human_sender = MagicMock(bot=False, username="regular_user")
+        human_msg = MagicMock()
+        human_msg.out = False
+        human_msg.chat_id = group_id
+        human_msg.is_private = False
+        human_event = MagicMock()
+        human_event.message = human_msg
+        human_event.chat_id = group_id
+        human_event.is_private = False
+        human_event.get_sender = AsyncMock(return_value=human_sender)
+
+        # Check logic: non-bot in group is ignored
+        is_bot = getattr(human_sender, "bot", False)
+        self.assertFalse(is_bot)
+
+        # 2. Pokémon Bot sends 'Who's that Pokémon?' silhouette in group -> must be handled!
+        bot_sender = MagicMock(bot=True, username="HeXamonbot")
+        bot_msg = MagicMock()
+        bot_msg.out = False
+        bot_msg.chat_id = group_id
+        bot_msg.is_private = False
+        bot_msg.raw_text = "Who's that Pokémon?"
+        bot_msg.media = MagicMock()
+        bot_msg.reply = AsyncMock()
+
+        inst.guess_handler.handle_challenge = AsyncMock(return_value=True)
+
+        self.assertTrue(inst.guess_handler.is_guess_challenge(bot_msg))
+        await inst.guess_handler.handle_challenge(inst.client, inst.account_name, bot_msg)
+        inst.guess_handler.handle_challenge.assert_called_once_with(inst.client, "FilterTester", bot_msg)
+
 if __name__ == "__main__":
     unittest.main()

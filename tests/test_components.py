@@ -1554,6 +1554,121 @@ class TestAutoHexaComponents(unittest.IsolatedAsyncioTestCase):
         btn_squirtle.click.assert_called_once()
         btn_pidgey.click.assert_not_called()
 
+    async def test_auto_switch_screenshot_iron_thorns_scenario(self):
+        """
+        Tests the exact screenshot scenario:
+        Wild Iron Thorns broke free and used Wild Charge.
+        Metagross fainted.
+        Party:
+        1. Metagross (Fainted)
+        2. Delphox
+        3. Primarina
+        4. Gengar
+        5. Iron Valiant
+        6. Corviknight
+
+        Buttons:
+        Row 0: [   ] [ 2 ]
+        Row 1: [ 3 ] [ 4 ]
+        Row 2: [ 5 ] [ 6 ]
+        Row 3: [ View Team ] [ Back ]
+        """
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex, auto_switch=True)
+
+        switch_msg = MagicMock()
+        switch_msg.id = 7788
+        switch_msg.chat_id = 12345
+        switch_msg.raw_text = (
+            "Aww! Wild Iron Thorns broke free!\n\n"
+            "Wild Iron Thorns used Wild Charge\n"
+            "It dealt 58 damage!\n"
+            "Metagross fainted!\n\n"
+            "Choose a Pokémon to switch to:\n\n"
+            "1. Metagross (Fainted)\n"
+            "2. Delphox\n"
+            "3. Primarina\n"
+            "4. Gengar\n"
+            "5. Iron Valiant\n"
+            "6. Corviknight"
+        )
+
+        btn_blank_1 = MagicMock(text=" ", click=AsyncMock())
+        btn_2 = MagicMock(text="2", click=AsyncMock())
+        btn_3 = MagicMock(text="3", click=AsyncMock())
+        btn_4 = MagicMock(text="4", click=AsyncMock())
+        btn_5 = MagicMock(text="5", click=AsyncMock())
+        btn_6 = MagicMock(text="6", click=AsyncMock())
+        btn_view_team = MagicMock(text="View Team", click=AsyncMock())
+        btn_back = MagicMock(text="Back", click=AsyncMock())
+
+        switch_msg.buttons = [
+            [btn_blank_1, btn_2],
+            [btn_3, btn_4],
+            [btn_5, btn_6],
+            [btn_view_team, btn_back]
+        ]
+        switch_msg.click = AsyncMock()
+
+        # 1. Assert is_switch_prompt detects this message
+        self.assertTrue(battle_handler.is_switch_prompt(switch_msg))
+
+        # 2. Assert is_battle_end does NOT treat this as battle end
+        self.assertFalse(battle_handler.is_battle_end(switch_msg))
+
+        # 3. Execute auto-switch
+        mock_client = AsyncMock()
+        success = await battle_handler.handle_battle_turn(mock_client, "test_account", switch_msg)
+        self.assertTrue(success)
+
+        # 4. Verify blank slot 1 (fainted Metagross) was never clicked
+        btn_blank_1.click.assert_not_called()
+        btn_view_team.click.assert_not_called()
+        btn_back.click.assert_not_called()
+
+        # 5. Verify either Primarina (Slot 3, Water vs Rock: 2.0x) or Iron Valiant (Slot 5, Fighting vs Rock: 2.0x) was clicked
+        clicked_btns = [
+            b for b, name in [
+                (btn_2, "2"), (btn_3, "3"), (btn_4, "4"), (btn_5, "5"), (btn_6, "6")
+            ] if b.click.called
+        ]
+        self.assertEqual(len(clicked_btns), 1, "Exactly one alive Pokémon button must be clicked")
+        # Primarina is slot 3, which is evaluated first among tied 2.0x effectiveness
+        self.assertTrue(btn_3.click.called or btn_5.click.called)
+
+    async def test_auto_switch_fallback_message_click_when_button_click_fails(self):
+        """Tests that if chosen_btn.click() throws an error, message.click() fallback is invoked."""
+        import config
+        from core.pokedex import PokedexService
+        from handlers.battle_handler import BattleHandler
+
+        pokedex = PokedexService(config.POKEDEX_FILE)
+        battle_handler = BattleHandler(pokedex, auto_switch=True)
+
+        switch_msg = MagicMock()
+        switch_msg.id = 7789
+        switch_msg.chat_id = 12345
+        switch_msg.raw_text = (
+            "Metagross fainted!\n\n"
+            "Choose a Pokémon to switch to:\n\n"
+            "1. Metagross (Fainted)\n"
+            "2. Delphox"
+        )
+
+        btn_2 = MagicMock(text="2", click=AsyncMock(side_effect=RuntimeError("Button click error")))
+        switch_msg.buttons = [[MagicMock(text=" "), btn_2]]
+        switch_msg.click = AsyncMock()
+
+        mock_client = AsyncMock()
+        success = await battle_handler.handle_battle_turn(mock_client, "test_account", switch_msg)
+        self.assertTrue(success)
+        btn_2.click.assert_called_once()
+        switch_msg.click.assert_called_once_with(text="2")
+
 if __name__ == "__main__":
     unittest.main()
 

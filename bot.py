@@ -152,6 +152,100 @@ async def handle_cancel(event):
     else:
         await event.respond("No active operation to cancel.", parse_mode="html")
 
+@bot.on(events.NewMessage(pattern=r"^(?:/|\.)go(?:@\w+)?(?:\s+.*)?$"))
+async def handle_bot_go_command(event):
+    """Enables auto-guess in this group for the user's accounts."""
+    if event.is_private:
+        await event.respond(
+            "<b>/go is used in groups!</b>\n\n"
+            "Add me and your userbot account to a Telegram group and type <code>/go</code> in the group "
+            "to activate continuous auto-guessing in that group.\n\n"
+            "To manage accounts, use /start.",
+            parse_mode="html"
+        )
+        return
+
+    user_id = event.sender_id
+    chat_id = event.chat_id
+    chat_title = getattr(event.chat, "title", str(chat_id)) or str(chat_id)
+
+    accounts = await db.get_user_accounts(user_id)
+    if not accounts:
+        if user_id in config.ADMIN_USER_IDS:
+            running_instances = list(multi_runner.instances.values())
+        else:
+            await event.reply("⚠️ You do not have any registered accounts in AutoHexa.\nOpen a private chat with me and use /start to add your account first!")
+            return
+    else:
+        running_instances = [
+            multi_runner.instances[a["id"]]
+            for a in accounts
+            if multi_runner.is_account_running(a["id"]) and a["id"] in multi_runner.instances
+        ]
+        if not running_instances:
+            # Auto-start user's active or first account
+            target_acc = next((a for a in accounts if a.get("is_active")), accounts[0])
+            started = await multi_runner.start_account(target_acc["id"])
+            if started and target_acc["id"] in multi_runner.instances:
+                running_instances = [multi_runner.instances[target_acc["id"]]]
+
+    if not running_instances:
+        await event.reply("⚠️ No running accounts available to guess in this group.\nPlease use /start in private chat to start your account!")
+        return
+
+    activated_names = []
+    for inst in running_instances:
+        inst.active_group_chats.add(chat_id)
+        inst.hunt_chat = str(chat_id)
+        await db.update_account_settings(inst.acc_id, hunt_chat=str(chat_id))
+        if inst.auto_guesser:
+            inst.auto_guesser.switch_target_chat(inst.account_name, inst.client, chat_id)
+        activated_names.append(inst.account_name)
+
+    names_str = ", ".join([f"<b>{n}</b>" for n in activated_names])
+    await event.reply(
+        f"⚡ <b>Auto-Guess Activated!</b>\n\n"
+        f"Group: <b>{chat_title}</b>\n"
+        f"Account(s): {names_str}\n\n"
+        f"Continuous <code>/guess</code> loop is now active in this group!",
+        parse_mode="html"
+    )
+
+@bot.on(events.NewMessage(pattern=r"^(?:/|\.)stop(?:@\w+)?(?:\s+.*)?$"))
+async def handle_bot_stop_command(event):
+    """Stops auto-guess in this group for the user's accounts."""
+    if event.is_private:
+        return
+
+    user_id = event.sender_id
+    chat_id = event.chat_id
+
+    accounts = await db.get_user_accounts(user_id)
+    running_instances = [
+        multi_runner.instances[a["id"]]
+        for a in accounts
+        if multi_runner.is_account_running(a["id"]) and a["id"] in multi_runner.instances
+    ] if accounts else []
+
+    if user_id in config.ADMIN_USER_IDS and not running_instances:
+        running_instances = list(multi_runner.instances.values())
+
+    stopped_names = []
+    for inst in running_instances:
+        if chat_id in inst.active_group_chats:
+            inst.active_group_chats.discard(chat_id)
+            if inst.auto_guesser:
+                inst.auto_guesser.stop_account(inst.account_name)
+            stopped_names.append(inst.account_name)
+
+    if stopped_names:
+        names_str = ", ".join([f"<b>{n}</b>" for n in stopped_names])
+        await event.reply(
+            f"⏹ <b>Auto-Guess Stopped</b>\n\n"
+            f"Group auto-guess has been stopped for: {names_str}",
+            parse_mode="html"
+        )
+
 # =========================================================================
 # INTERACTIVE LOGIN WIZARD (TEXT INPUT)
 # =========================================================================

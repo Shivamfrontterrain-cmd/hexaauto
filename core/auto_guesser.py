@@ -67,6 +67,12 @@ class AutoGuesser:
             # 3. Send /guess command
             try:
                 target_chat = self.target_chats.get(account_name) or config.HUNT_CHAT
+                # Ensure integer string IDs (like negative group IDs) are cast to int for Telethon
+                try:
+                    if isinstance(target_chat, str) and (target_chat.startswith("-") or target_chat.isdigit()):
+                        target_chat = int(target_chat)
+                except (ValueError, TypeError):
+                    pass
                 logger.info("[%s] ❓ Sending '%s' to %s...", account_name, config.GUESS_COMMAND, target_chat)
                 await client.send_message(target_chat, config.GUESS_COMMAND)
             except Exception as e:
@@ -105,9 +111,9 @@ class AutoGuesser:
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
 
-    def start_account(self, account_name: str, client: TelegramClient, index: int = 0, target_chat: Optional[str] = None):
+    def start_account(self, account_name: str, client: TelegramClient, index: int = 0, target_chat: Optional[any] = None):
         """Starts the auto-guess loop for an account."""
-        if not config.AUTO_GUESS_ENABLED:
+        if not config.AUTO_GUESS_ENABLED and not target_chat:
             logger.info("[%s] Auto-guess is disabled in config.", account_name)
             return
 
@@ -115,12 +121,42 @@ class AutoGuesser:
             logger.warning("[%s] Auto-guess worker is already running.", account_name)
             return
 
-        if target_chat:
+        if target_chat is not None:
             self.target_chats[account_name] = target_chat
 
+        self.is_running = True
         initial_delay = 3.0 + (index * 4.0)
         task = asyncio.create_task(self._guess_loop(account_name, client, initial_delay))
         self.tasks[account_name] = task
+
+    def stop_account(self, account_name: str):
+        """Stops the auto-guess worker task for a single account."""
+        if account_name in self.tasks:
+            task = self.tasks[account_name]
+            if not task.done():
+                task.cancel()
+            self.tasks.pop(account_name, None)
+            logger.info("[%s] Stopped auto-guess worker.", account_name)
+
+    def switch_target_chat(self, account_name: str, client: TelegramClient, new_chat: any):
+        """Switches the target chat (e.g. for group /go) and restarts the guess loop immediately."""
+        self.target_chats[account_name] = new_chat
+        self.is_running = True
+
+        # Stop existing worker task if running
+        if account_name in self.tasks:
+            task = self.tasks[account_name]
+            if not task.done():
+                task.cancel()
+            self.tasks.pop(account_name, None)
+
+        # Release any pending guess event lock
+        self.mark_guess_complete(account_name)
+
+        # Launch fresh guess loop targeting the new chat with small initial delay
+        task = asyncio.create_task(self._guess_loop(account_name, client, initial_delay=0.5))
+        self.tasks[account_name] = task
+        logger.info("[%s] Auto-guesser redirected to chat %s", account_name, new_chat)
 
     def stop_all(self):
         """Cancels all active guess worker tasks."""

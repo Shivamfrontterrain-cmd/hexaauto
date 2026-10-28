@@ -105,41 +105,48 @@ class BattleHandler:
         """Determines if a battle message is prompting the player to switch Pokémon."""
         if not message:
             return False
-        text = (message.raw_text or "").lower()
+        raw = message.raw_text or ""
+        clean = raw.lower().replace("é", "e").replace("’", "'").replace("`", "'")
+        clean = " ".join(clean.split())
 
-        # Direct prompt phrases (handles Pokémon / Pokemon)
+        # 1. Direct prompt phrases
         switch_phrases = (
-            "choose a pokémon to switch to",
             "choose a pokemon to switch to",
-            "choose a pokémon to switch",
             "choose a pokemon to switch",
-            "choose a pokémon to send out",
             "choose a pokemon to send out",
-            "select a pokémon to switch",
+            "choose which pokemon to send out",
             "select a pokemon to switch",
-            "which pokémon will you switch",
+            "select a pokemon to send out",
             "which pokemon will you switch",
+            "choose your next pokemon",
+            "choose a pokemon to replace",
             "switch to:",
             "send out:"
         )
-        if any(p in text for p in switch_phrases):
+        if any(p in clean for p in switch_phrases):
             return True
 
-        # Check for faint followed by switch selection or party listing
-        if ("fainted" in text or "faint" in text) and any(w in text for w in ("switch", "send out", "choose")):
+        # 2. Check for faint followed by switch selection or party listing
+        if ("fainted" in clean or "faint" in clean) and any(w in clean for w in ("switch", "send out", "choose", "select")):
             return True
 
-        # Button and list heuristic:
-        # Message lists party entries (e.g. "1. Metagross (Fainted)", "2. Delphox")
-        # and has inline buttons containing slot digits (1-6) or "view team"
+        # 3. Party listing in text (e.g. "1. Metagross (Fainted)", "2. Delphox")
+        has_party_list = bool(re.search(r"(?:^|[^\d])[1-6][\.\:\)\-]\s+[A-Za-z]", raw))
+
+        # 4. Button heuristic: HeXamon switch screen button layout
         buttons = message.buttons or []
         if buttons:
             btn_texts = [btn.text.strip().lower() for row in buttons for btn in row]
             has_view_team = any("team" in b or "party" in b for b in btn_texts)
-            has_digits = any(b.isdigit() and 1 <= int(b) <= 6 for b in btn_texts)
-            if (has_view_team or has_digits) and (
-                "fainted" in text or "switch" in text or re.search(r"^\s*[1-6][\.\:\)]\s*\w+", text, re.MULTILINE)
+            has_digits = any(re.search(r"\b[1-6]\b", b) for b in btn_texts)
+            has_back = any("back" in b or "cancel" in b for b in btn_texts)
+
+            if (has_view_team or (has_digits and has_back)) and (
+                "fainted" in clean or "switch" in clean or has_party_list
             ):
+                return True
+
+            if has_digits and (has_view_team or has_back):
                 return True
 
         return False
@@ -152,6 +159,13 @@ class BattleHandler:
         # CRITICAL: A switch prompt (e.g. player's Pokémon fainted) is an active battle turn, NOT an end!
         if self.is_switch_prompt(message):
             return False
+
+        # If message has switch buttons (slot digits 2-6 or view team), it's a switch menu, never battle end
+        buttons = message.buttons or []
+        if buttons:
+            btn_texts = [btn.text.strip().lower() for row in buttons for btn in row]
+            if any("team" in b or "party" in b for b in btn_texts) or any(re.search(r"\b[2-6]\b", b) for b in btn_texts):
+                return False
 
         text = (message.raw_text or "").lower()
 

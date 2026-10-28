@@ -41,6 +41,12 @@ class ClientManager:
         self.auto_guesser = auto_guesser
         self.clients: Dict[str, TelegramClient] = {}
         self.sessions_dir = config.SESSIONS_DIR
+        self.active_group_chats: set = set()
+        if config.HUNT_CHAT and (str(config.HUNT_CHAT).startswith("-") or str(config.HUNT_CHAT).isdigit()):
+            try:
+                self.active_group_chats.add(int(config.HUNT_CHAT))
+            except ValueError:
+                pass
 
     def discover_sessions(self) -> List[Path]:
         """Finds all existing .session files in the sessions/ folder."""
@@ -67,17 +73,81 @@ class ClientManager:
         await client.disconnect()
 
     def _register_events(self, client: TelegramClient, account_name: str):
-        """Registers event listeners on the client for target bot interactions."""
-        target_chats = [config.TARGET_BOT]
-        if config.HUNT_CHAT and config.HUNT_CHAT.lower() != config.TARGET_BOT.lower():
-            target_chats.append(config.HUNT_CHAT)
+        """Registers event listeners on the client for target bot interactions and group commands."""
 
-        @client.on(events.NewMessage(chats=target_chats, incoming=True))
-        @client.on(events.MessageEdited(chats=target_chats, incoming=True))
+        @client.on(events.NewMessage(pattern=r"^(?:/|\.)(?:go|stop)(?:@\w+)?(?:\s+.*)?$"))
+        async def on_group_command(event):
+            """Handles /go and /stop commands in groups or private chats to control auto-guessing."""
+            try:
+                me = await client.get_me()
+                my_id = me.id if me else None
+                sender_id = event.sender_id
+
+                is_self = event.out or (my_id and sender_id == my_id)
+                is_admin = bool(
+                    (config.ADMIN_USER_IDS and sender_id in config.ADMIN_USER_IDS) or
+                    (config.ALERT_USER_ID and sender_id == config.ALERT_USER_ID)
+                )
+                has_no_admin = not config.ADMIN_USER_IDS and not config.ALERT_USER_ID
+
+                if not (is_self or is_admin or has_no_admin):
+                    return
+
+                text = (event.raw_text or "").strip().lower()
+                chat_id = event.chat_id
+
+                if text.startswith(("/go", ".go")):
+                    logger.info("[%s] 🚀 /go command received in chat %s! Activating auto-guess in group...", account_name, chat_id)
+                    self.active_group_chats.add(chat_id)
+                    if self.auto_guesser:
+                        self.auto_guesser.switch_target_chat(account_name, client, chat_id)
+                    try:
+                        await event.reply("⚡ **[AutoHexa]** Auto-guess activated for this group! Starting /guess loop...")
+                    except Exception as e:
+                        logger.debug("[%s] Failed to send /go confirmation: %s", account_name, e)
+
+                elif text.startswith(("/stop", ".stop")):
+                    logger.info("[%s] ⏹ /stop command received in chat %s! Stopping auto-guess...", account_name, chat_id)
+                    self.active_group_chats.discard(chat_id)
+                    if self.auto_guesser:
+                        self.auto_guesser.stop_account(account_name)
+                    try:
+                        await event.reply("⏹ **[AutoHexa]** Auto-guess stopped for this group.")
+                    except Exception as e:
+                        logger.debug("[%s] Failed to send /stop confirmation: %s", account_name, e)
+            except Exception as e:
+                logger.error("[%s] Error handling group command: %s", account_name, e)
+
+        @client.on(events.NewMessage(incoming=True))
+        @client.on(events.MessageEdited(incoming=True))
         async def on_bot_message(event):
             # Never process outgoing messages sent by the userbot
             if event.message.out:
                 return
+
+            chat_id = event.chat_id
+
+            # Determine whether this message is from an active target chat:
+            is_active_chat = False
+            if chat_id in self.active_group_chats:
+                is_active_chat = True
+            elif config.HUNT_CHAT and (str(chat_id) == str(config.HUNT_CHAT)):
+                is_active_chat = True
+            elif event.is_private:
+                target_bot_lower = config.TARGET_BOT.lower()
+                sender = await event.get_sender()
+                sender_username = (getattr(sender, "username", None) or "").lower()
+                if sender_username == target_bot_lower or str(chat_id) == str(config.TARGET_BOT):
+                    is_active_chat = True
+
+            if not is_active_chat:
+                return
+
+            # In group chats, ignore normal user messages (only listen to bots)
+            if not event.is_private:
+                sender = await event.get_sender()
+                if not getattr(sender, "bot", False):
+                    return
 
             # Check if this account is currently paused due to an unhandled check
             if account_name in self.check_handler.paused_accounts:
@@ -111,7 +181,13 @@ class ClientManager:
                     self.auto_guesser.set_cooldown(account_name, gcd)
                     return
 
-            # 5. Battle result / conclusion (rewards, PD earned, fainted, caught, fled)
+            # 5a. Switch prompt (Pokémon fainted or switch requested in ongoing battle)
+            # Evaluated before is_battle_end so player fainting isn't mistaken for battle conclusion!
+            if self.battle_handler and self.battle_handler.is_switch_prompt(message):
+                await self.battle_handler.handle_battle_turn(client, account_name, message)
+                return
+
+            # 5b. Battle result / conclusion (rewards, PD earned, enemy fainted, caught, fled)
             if self.battle_handler and self.battle_handler.is_battle_end(message):
                 self.battle_handler.handle_battle_result(account_name, message, client=client)
                 if self.spawn_handler and hasattr(self.spawn_handler, "active_encounters"):
